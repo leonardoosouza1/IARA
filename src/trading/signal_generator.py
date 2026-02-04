@@ -85,12 +85,21 @@ class SignalEngine:
             logger.error(f"Normalizer usage failed: {e}")
             raise
 
-    def process_live_data(self, parquet_path: Path) -> Tuple[torch.Tensor, float, float]:
+    def process_live_data(self, parquet_path: Path) -> Tuple[torch.Tensor, float, float, float]:
         # Mimic training preprocessing logic
         df = process_single_asset(parquet_path)
         if df is None: raise ValueError("Data processing failed")
         
         feature_cols = self.normalizer.feature_names
+        # Ensure we have all features the normalizer expects
+        available_cols = [c for c in feature_cols if c in df.columns]
+        if len(available_cols) != len(feature_cols):
+            # Fallback if normalizer expects sentiment but df misses it (shouldn't happen with new processor)
+            missing = set(feature_cols) - set(available_cols)
+            logger.warning(f"Missing features: {missing}. Filling with 0.")
+            for m in missing:
+                df = df.with_columns(pl.lit(0.0).alias(m))
+        
         features_np = df.select(feature_cols).to_numpy()
         features_norm_np = self.normalizer.transform(features_np)
         
@@ -106,24 +115,21 @@ class SignalEngine:
         last_row = df.tail(1)
         current_adx = last_row["adx"].item()
         current_rsi = last_row["rsi"].item()
+        current_sentiment = last_row["global_sentiment"].item() if "global_sentiment" in df.columns else 0.0
         
         tensor = torch.tensor(recent_data).unsqueeze(0).to(self.device)
-        return tensor, current_adx, current_rsi
+        return tensor, current_adx, current_rsi, current_sentiment
 
     def predict(self, ticker: str, data_path: Path) -> TradeSignal:
         try:
-            input_tensor, adx, rsi = self.process_live_data(data_path)
+            input_tensor, adx, rsi, sentiment = self.process_live_data(data_path)
             
             with torch.no_grad():
                 with torch.amp.autocast('cuda'):
                     logits, _ = self.model(input_tensor)
                     prob = torch.sigmoid(logits).item()
             
-            # v6.4 Active Decision
-            # Feed result to Active Brain (In production, we would feed actual outcome too)
-            # For now, we update the prediction history.
-            # Ideally, a separate process calls active_brain.log_prediction(prob, actual_outcome)
-            
+            # v6.7 Active Inference 2.0 (Volatility Shield + Sentiment)
             decision = self.active_brain.get_decision(prob)
             
             # Filter Logic
@@ -131,6 +137,16 @@ class SignalEngine:
             if "Volatile" in decision:
                 check = False
             
+            # Sentiment Shield: Only allow Aggressive Mode (0.55) if Sentiment is aligned
+            threshold = self.active_brain.current_threshold
+            if threshold < 0.60: # Aggressive Mode
+                if "BUY" in decision and sentiment < -0.05: # Buying against Bearish Trend
+                    check = False
+                    decision = f"{decision} (SENTIMENT MISMATCH 📉)"
+                elif "SELL" in decision and sentiment > 0.05: # Selling against Bullish Trend
+                    check = False
+                    decision = f"{decision} (SENTIMENT MISMATCH 📈)"
+
             # Additional Filters
             if adx < 20: 
                 check = False

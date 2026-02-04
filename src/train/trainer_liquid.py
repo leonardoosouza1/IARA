@@ -10,10 +10,12 @@ Features:
 - ReduceLROnPlateau Scheduler
 """
 
+import json
+import time
 import argparse
 import logging
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -21,11 +23,13 @@ import numpy as np
 import polars as pl
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset, WeightedRandomSampler
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
 
 from src.model.iara_liquid import IARA, LiquidConfig
+from src.utils.logger import TelemetryLogger
 
 # Configure logging
 logging.basicConfig(
@@ -37,34 +41,35 @@ logger = logging.getLogger(__name__)
 # Paths
 DATA_PROCESSED_DIR = Path(__file__).parent.parent.parent / "data" / "processed"
 CHECKPOINT_DIR = Path(__file__).parent.parent.parent / "checkpoints"
+LOGS_DIR = Path(__file__).parent.parent.parent / "logs"
 
 
 @dataclass
 class TrainerConfig:
-    """Training configuration v6.1 (High Volume + AMP + Opt)."""
+    """Training configuration v6.7 (Expert Symmetry + Profit Focus)."""
     
-    # Data
     # Data
     seq_len: int = 256
-    stride: int = 2  # v6.2 Tuning: Stride 2 for 4x data volume vs stride 8
-    batch_size: int = 1024  # Increased batch for smaller model
-    accumulation_steps: int = 1 
-    num_workers: int = 4
+    stride: int = 2
+    batch_size: int = 1024
+    accumulation_steps: int = 1
+    num_workers: int = 8
     val_split: float = 0.2
     
-    # Model (Simplified for Convergence)
-    input_dim: int = 15
-    hidden_dim: int = 64  # Reduced from 512 to prevent overfitting on noise
+    # Model (Capacity Doubled + Expert Heads)
+    input_dim: int = 16  # v6.7: Global Sentiment
+    hidden_dim: int = 128
     num_heads: int = 4
-    dropout: float = 0.3 # Reduced dropout
+    dropout: float = 0.5   # v6.7: High dropout for stacked layers
     max_seq_len: int = 256
+    num_cfc_layers: int = 2 # v6.7: Stacked CfC
     
     # Training
     epochs: int = 200
     learning_rate: float = 0.001
     weight_decay: float = 1e-4
     grad_clip: float = 0.5
-    resume: bool = False  # Resume flag
+    resume: bool = False
     
     # Label Smoothing
     label_smooth: float = 0.1
@@ -75,14 +80,54 @@ class TrainerConfig:
     scale_max: float = 1.02
     
     # Early Stopping
-    patience: int = 40
+    patience: int = 150  # v6.8: Increased for Blindfold adaptation period
     
     # Checkpointing
     checkpoint_dir: Path = CHECKPOINT_DIR
+    
+    # v6.7 Adaptive
+    asymmetry_penalty: float = 2.5
+    error_memory_size: int = 500
 
+class AsymmetricFocalLoss(nn.Module):
+    """
+    v6.7 Profit-Weighted Asymmetric Focal Loss.
+    - Down-weights easy examples (gamma).
+    - Up-weights positive class (alpha).
+    - Multiplies loss by 'profit_weight' (Volatility) to prioritize big moves.
+    """
+    def __init__(self, alpha: float = 0.75, gamma: float = 2.0, reduction: str = 'mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, weights: torch.Tensor = None) -> torch.Tensor:
+        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        pt = torch.exp(-bce_loss) # prob of correct class
+        
+        # Focal term: (1 - pt)^gamma
+        focal_term = (1 - pt) ** self.gamma
+        
+        # Alpha balancing: Higher weight for positive class (1)
+        # targets is 0 or 1.
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        loss = alpha_t * focal_term * bce_loss
+        
+        # v6.7 Profit Weighting
+        if weights is not None:
+            loss = loss * weights
+        
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
 
 class MultiAssetDataset(Dataset):
-    """Multi-asset dataset with support for all processed tickers."""
+    """Multi-asset dataset with Profit-Weighting."""
     
     def __init__(
         self,
@@ -130,6 +175,7 @@ class MultiAssetDataset(Dataset):
                     continue
                 
                 if self.feature_cols is None:
+                    # v6.7: Ensure Global Sentiment is included if processed
                     self.feature_cols = sorted([c for c in df.columns if c.endswith("_norm")])
                     logger.info(f"Features: {self.feature_cols}")
                 
@@ -169,7 +215,7 @@ class MultiAssetDataset(Dataset):
     def __len__(self) -> int:
         return len(self.indices)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         sample_idx, start_row = self.indices[idx]
         features, targets, _, _ = self.samples[sample_idx]
         
@@ -184,10 +230,17 @@ class MultiAssetDataset(Dataset):
         raw_target = targets[end_row - 1]
         binary_target = 1.0 if raw_target > 0 else 0.0
         
+        # v6.7 Profit Weighting
+        # Boost weight for high-magnitude moves (Volatility Aware)
+        # 1.0 nominal + up to 0.5 extra for big moves
+        abs_ret = abs(raw_target)
+        # Assume 1% move (0.01) is "Big". 
+        profit_weight = 1.0 + min(50.0 * abs_ret, 1.5) # Caps at 2.5x total weight for massive moves
+        
         if self.label_smooth > 0:
             binary_target = binary_target * (1 - 2 * self.label_smooth) + self.label_smooth
         
-        return x, torch.tensor(binary_target, dtype=torch.float32)
+        return x, torch.tensor(binary_target, dtype=torch.float32), torch.tensor(profit_weight, dtype=torch.float32)
     
     @property
     def input_dim(self) -> int:
@@ -233,6 +286,7 @@ class MultiAssetDataset(Dataset):
 
 
 class Trainer:
+    """IARA v6.7 Expert Symmetry Trainer."""
     def __init__(self, config: TrainerConfig, device: torch.device):
         self.config = config
         self.device = device
@@ -245,6 +299,8 @@ class Trainer:
         
         train_idxs, val_idxs = full_dataset.get_chronological_split(config.val_split)
         pos_weight = full_dataset.compute_class_weights(train_idxs)
+        
+        self.telemetry = TelemetryLogger()
         
         # Training dataset
         train_dataset = MultiAssetDataset(
@@ -268,7 +324,7 @@ class Trainer:
             batch_size=config.batch_size,
             shuffle=True,
             num_workers=config.num_workers,
-            pin_memory=True,
+            pin_memory=True, # Critical for high throughput
             drop_last=True
         )
         
@@ -291,13 +347,14 @@ class Trainer:
         self.epoch_losses_history = torch.zeros(n_samples, 10) # Track last 10 losses for Noise detection
 
         
-        # Model v6.1 (Fractal CfC)
+        # Model v6.7 (Expert Symmetry)
         liquid_config = LiquidConfig(
             input_dim=config.input_dim,
-            hidden_dim=config.hidden_dim,
+            hidden_dim=config.hidden_dim, # 128
             num_heads=config.num_heads,
             dropout=config.dropout,
-            max_seq_len=config.max_seq_len
+            max_seq_len=config.max_seq_len,
+            num_cfc_layers=config.num_cfc_layers # 2
         )
         self.model = IARA(liquid_config).to(device)
         
@@ -319,9 +376,12 @@ class Trainer:
             patience=5
         )
         
-        # Loss
-        pos_weight_tensor = torch.tensor([pos_weight], device=device)
-        self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+        # v6.7 Profit Weighted Focal Loss (Balanced)
+        # alpha=0.55 (Slight Positive Bias, down from 0.75 Permabull)
+        # gamma=1.5 (Standard Focal, down from 2.0)
+        self.criterion = AsymmetricFocalLoss(alpha=0.55, gamma=1.5, reduction='none')
+        # Legacy for valid reporting (BCE is standard metric)
+        self.valid_criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], device=device))
         
         # AMP Scaler
         self.scaler = torch.amp.GradScaler('cuda')
@@ -337,7 +397,7 @@ class Trainer:
             self._resume_checkpoint()
         
         logger.info(f"Model Parameters: {self.model.count_parameters():,}")
-        logger.info(f"Config: seq_len={config.seq_len}, stride={config.stride}, batch={config.batch_size}, AMP=True, Resume={config.resume}")
+        logger.info(f"Config: seq_len={config.seq_len}, stride={config.stride}, batch={config.batch_size}, Effective Batch={config.batch_size * config.accumulation_steps}, Units={config.hidden_dim}")
 
     def _resume_checkpoint(self):
         latest_path = self.config.checkpoint_dir / "latest.pth"
@@ -349,10 +409,20 @@ class Trainer:
         checkpoint = torch.load(latest_path, map_location=self.device, weights_only=False)
         
         # Load Model
+        # v6.5 Compatibility: If resume from v6.1 (64 units) to v6.5 (128 units), weights won't match.
+        # We must detect this and handle gracefully or error out.
         state_dict = checkpoint['model']
         if list(state_dict.keys())[0].startswith('_orig_mod.'):
             state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
-        self.model.load_state_dict(state_dict)
+            
+        try:
+            self.model.load_state_dict(state_dict)
+            logger.info("Weights restored successfully.")
+        except RuntimeError as e:
+            logger.warning(f"Dimension mismatch (expected when upgrading capacity): {e}")
+            logger.warning("Starting fresh with new architecture, but keeping epoch count and memory stats.")
+            # We don't load optimizer if model changed structure
+            return
         
         # Load Optimizer & Scheduler
         if 'optimizer' in checkpoint:
@@ -394,15 +464,30 @@ class Trainer:
         context = torch.enable_grad() if training else torch.no_grad()
         
         with context:
-            for i, (x, y) in enumerate(pbar):
+            for i, batch in enumerate(pbar):
+                # Unpack batch (Handle 2 or 3 items)
+                if len(batch) == 3:
+                    x, y, w = batch
+                    w = w.to(self.device)
+                else:
+                    x, y = batch
+                    w = None
+                    
                 x, y = x.to(self.device), y.to(self.device)
                 
                 # Mixed Precision Forward
                 with torch.amp.autocast('cuda'):
                     logits, _ = self.model(x)
-                    loss = self.criterion(logits, y)
+                    
+                    if training:
+                        # v6.7 Profit-Weighted Focal Loss
+                        loss_per_sample = self.criterion(logits.squeeze(), y, weights=w)
+                        loss = loss_per_sample.mean()
+                    else:
+                        loss = self.valid_criterion(logits.squeeze(), y)
                 
                 if training:
+                    # Gradient Accumulation v6.5
                     scaled_loss = loss / self.config.accumulation_steps
                     self.scaler.scale(scaled_loss).backward()
                     
@@ -416,7 +501,7 @@ class Trainer:
                         if isinstance(pbar, tqdm):
                             lr = self.optimizer.param_groups[0]['lr']
                             # Multiply loss by steps to show real loss for display
-                            pbar.set_postfix(loss=f"{loss.item() * self.config.accumulation_steps:.4f}", lr=f"{lr:.2e}")
+                            pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr:.2e}")
                 
                 probs = torch.sigmoid(logits)
                 preds = (probs > 0.5).float()
@@ -424,7 +509,7 @@ class Trainer:
                 hard_y = (y > 0.5).float()
                 correct += (preds == hard_y).sum().item()
                 total += y.size(0)
-                losses.append(loss.item() * self.config.accumulation_steps if training else loss.item())
+                losses.append(loss.item())
                 
                 all_preds.extend(probs.detach().cpu().numpy())
                 all_targets.extend(hard_y.detach().cpu().numpy())
@@ -491,7 +576,7 @@ class Trainer:
         
         with torch.no_grad():
             with torch.amp.autocast('cuda'):
-                for X, y in eval_loader:
+                for X, y, _ in eval_loader: # Added _ for profit_weight
                     X, y = X.to(self.device), y.to(self.device)
                     logits, _ = self.model(X)
                     loss = nn.BCEWithLogitsLoss(reduction='none')(logits.squeeze(), y)
@@ -555,7 +640,7 @@ class Trainer:
         weights[very_high_loss] *= 2.0 # Extra boost for "Arrogant" errors
         
         # Penalize Mastered Lessons (Skip)
-        mastered_indices = self.mastered_counter >= 5
+        mastered_indices = self.mastered_counter >= 10  # v6.5 Stricter Threshold (Correct for 10 epochs)
         weights[mastered_indices] *= 0.1
         
         # Zero out Noise (Ignore)
@@ -593,76 +678,128 @@ class Trainer:
         logger.info("Trainer: Curriculum Updated (v6.4 Self-Correction).")
 
     def train(self):
-        logger.info("Starting Training v6.1 (AMP + Opt + Hard Mining + Auto-Rollback)...")
+        logger.info("Starting Training v6.5 Scaled Intelligence (AMP + Focal Loss + Selective Memory)...")
         
         # Keep track of LR to detect reductions
         current_lr = self.config.learning_rate
         best_model_state = None
         
-        for epoch in range(self.start_epoch, self.config.epochs):
-            self.epoch = epoch
-            train_m, val_m = self.train_epoch()
-            
-            # Step Scheduler
-            self.scheduler.step(val_m['loss'])
-            new_lr = self.optimizer.param_groups[0]['lr']
-            
-            logger.info(
-                f"Epoch {epoch}: "
-                f"Train[Loss={train_m['loss']:.4f}, Acc={train_m['accuracy']:.2%}, AUC={train_m['auc']:.4f}] | "
-                f"Val[Loss={val_m['loss']:.4f}, Acc={val_m['accuracy']:.2%}, AUC={val_m['auc']:.4f}]"
-            )
-            
-            if val_m['auc'] > self.best_val_auc:
-                self.best_val_auc = val_m['auc']
-                self.patience_counter = 0
-                self.save_checkpoint("best_model.pth")
-                # Cache best state in RAM for quick rollback
-                # Copy is needed because state_dict is a reference
-                best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
-                logger.info(f"  ✓ New best Val AUC: {self.best_val_auc:.4f} (State Cached)")
-            else:
-                self.patience_counter += 1
-                logger.info(f"  No improvement ({self.patience_counter}/{self.config.patience})")
-            
-            # AUTO-ROLLBACK 2.0 (Weight Interpolation)
-            # If LR dropped (Scheduler detected plateau), blend current weights with best weights
-            if new_lr < current_lr:
-                if best_model_state is not None:
-                    logger.info(f"  ↺ Plateau detected (LR {current_lr:.2e} -> {new_lr:.2e}). Applying Auto-Rollback 2.0 (Blending 70% Best + 30% Current)...")
-                    
-                    current_state = self.model.state_dict()
-                    blended_state = {}
-                    
-                    for k, best_v in best_model_state.items():
-                        # Blend floating point weights
-                        if best_v.is_floating_point():
-                            curr_v = current_state[k] # Already on device
-                            best_v_dev = best_v.to(self.device)
-                            blended_state[k] = (0.7 * best_v_dev) + (0.3 * curr_v)
-                        else:
-                            # Keep integer buffers (e.g. step counters) from best model
-                            blended_state[k] = best_v.to(self.device)
-                            
-                    self.model.load_state_dict(blended_state)
-                else:
-                    logger.warning("  LR reduced but no best model to rollback to.")
-                current_lr = new_lr
+        try:
+            for epoch in range(self.start_epoch, self.config.epochs):
+                self.epoch = epoch
+                train_m, val_m = self.train_epoch()
                 
-            # Update Sampler for next epoch (Feedback Loop)
-            # Only do this if not early stopping
-            if self.epoch < self.config.epochs - 1:
-                self.update_sampler_weights()
-            
-            # Always save latest for resume
-            self.save_checkpoint("latest.pth")
-            
-            if self.patience_counter >= self.config.patience:
-                logger.info(f"Early stopping after {epoch + 1} epochs")
-                break
-            
-
+                # Step Scheduler
+                self.scheduler.step(val_m['loss'])
+                new_lr = self.optimizer.param_groups[0]['lr']
+                
+                # Telemetry Collection
+                chronic_count = self.chronic_counter.gt(0).sum().item()
+                mastered_count = self.mastered_counter.gt(0).sum().item()
+                noise_count = self.noise_mask.sum().item()
+                
+                vram_usage = 0
+                if torch.cuda.is_available():
+                    vram_usage = torch.cuda.memory_allocated() / torch.cuda.get_device_properties(0).total_memory * 100
+                
+                self.telemetry.log({
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "epoch": epoch,
+                    "train": train_m,
+                    "val": val_m,
+                    "metrics": {
+                        "learning_rate": new_lr,
+                        "best_auc": self.best_val_auc
+                    },
+                    "memory": {
+                        "chronic": chronic_count,
+                        "mastered": mastered_count,
+                        "noise_discarded": noise_count
+                    },
+                    "hardware": {
+                        "vram_percent": round(vram_usage, 2)
+                    }
+                })
+                
+                logger.info(
+                    f"Epoch {epoch}: "
+                    f"Train[Loss={train_m['loss']:.4f}, Acc={train_m['accuracy']:.2%}, AUC={train_m['auc']:.4f}] | "
+                    f"Val[Loss={val_m['loss']:.4f}, Acc={val_m['accuracy']:.2%}, AUC={val_m['auc']:.4f}]"
+                )
+                
+                if val_m['auc'] > self.best_val_auc:
+                    self.best_val_auc = val_m['auc']
+                    self.patience_counter = 0
+                    self.save_checkpoint("best_model.pth")
+                    # Cache best state in RAM for quick rollback
+                    # Copy is needed because state_dict is a reference
+                    best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                    logger.info(f"  ✓ New best Val AUC: {self.best_val_auc:.4f} (State Cached)")
+                else:
+                    self.patience_counter += 1
+                    logger.info(f"  No improvement ({self.patience_counter}/{self.config.patience})")
+                
+                # AUTO-ROLLBACK 2.0 (Weight Interpolation)
+                # If LR dropped (Scheduler detected plateau), blend current weights with best weights
+                if new_lr < current_lr:
+                    if best_model_state is not None:
+                        logger.info(f"  ↺ Plateau detected (LR {current_lr:.2e} -> {new_lr:.2e}). Applying Auto-Rollback 2.0 (Blending 70% Best + 30% Current)...")
+                        
+                        current_state = self.model.state_dict()
+                        blended_state = {}
+                        
+                        for k, best_v in best_model_state.items():
+                            # Blend floating point weights
+                            if best_v.is_floating_point():
+                                curr_v = current_state[k] # Already on device
+                                best_v_dev = best_v.to(self.device)
+                                blended_state[k] = (0.7 * best_v_dev) + (0.3 * curr_v)
+                            else:
+                                # Keep integer buffers (e.g. step counters) from best model
+                                blended_state[k] = best_v.to(self.device)
+                                
+                        self.model.load_state_dict(blended_state)
+                    else:
+                        logger.warning("  LR reduced but no best model to rollback to.")
+                    current_lr = new_lr
+                    
+                # Update Sampler for next epoch (Feedback Loop)
+                # Only do this if not early stopping
+                if self.epoch < self.config.epochs - 1:
+                    self.update_sampler_weights()
+                
+                # Always save latest for resume
+                self.save_checkpoint("latest.pth")
+                
+                if self.patience_counter >= self.config.patience:
+                    logger.info(f"Early stopping after {epoch + 1} epochs")
+                    break
         
+        except KeyboardInterrupt:
+            logger.warning("\n⚠️  KEYBOARD INTERRUPT DETECTED! INITIATING GRACEFUL SHUTDOWN...")
+            
+            # Save Interrupted State
+            self.save_checkpoint("interrupted_model.pth")
+            logger.info("✅ Saved 'interrupted_model.pth' - You can resume from here.")
+            
+            # Final Telemetry
+            self.telemetry.log({
+                "status": "INTERRUPTED",
+                "last_epoch": self.epoch,
+                "best_auc": self.best_val_auc
+            })
+            
+            # Summary Table
+            print("\n" + "="*50)
+            print("🛑  TRAINING INTERRUPTED SESSION SUMMARY")
+            print("="*50)
+            print(f"Start Epoch: {self.start_epoch}")
+            print(f"Last Epoch:  {self.epoch}")
+            print(f"Best AUC:    {self.best_val_auc:.4f}")
+            print(f"Log File:    {self.telemetry.log_path}")
+            print("="*50 + "\n")
+            return
+
         logger.info(f"Training finished. Best Val AUC: {self.best_val_auc:.4f}")
 
 

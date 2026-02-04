@@ -13,6 +13,7 @@ services:
       - ./data:/app/data
       - ./config:/app/config
       - ./checkpoints:/app/checkpoints
+      - ./reports:/app/reports
     
     # Shared Memory (Critical for PyTorch DataLoader with Workers)
     shm_size: '8gb'

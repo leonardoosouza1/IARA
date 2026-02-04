@@ -15,3 +15,10 @@ scikit-learn
 # Utilities
 tqdm
 PyYAML
+
+# GPU Kernels (ROCm Compatible)
+triton>=2.1.0
+
+# Visualization
+matplotlib
+seaborn
