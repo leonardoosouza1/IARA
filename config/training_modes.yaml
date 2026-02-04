@@ -1,0 +1,123 @@
+# Saci-Nano Training Modes Configuration
+# ========================================
+# Define training presets for different use cases.
+# Select mode via: python src/train/trainer.py --mode <mode_name>
+#
+# Available modes are defined below. You can add, edit, or remove them freely.
+# The special key "_active_default" sets the default mode when none is specified.
+
+_active_default: moderate
+
+# ============================================================================
+# TRAINING MODES
+# ============================================================================
+
+# Ultra-fast: Quick sanity checks (minutes)
+ultra_fast:
+  description: "Ultra-fast sanity check (~2-5 min)"
+  model:
+    dim: 256
+    n_layers: 4
+    n_heads: 4
+    n_kv_heads: 2
+    dropout: 0.1
+  data:
+    seq_len: 128
+    batch_size: 32
+  training:
+    epochs: 2
+    learning_rate: 0.001
+    weight_decay: 0.1
+    gradient_accumulation_steps: 2
+    warmup_steps: 50
+    max_grad_norm: 1.0
+  checkpointing:
+    save_every_n_epochs: 1
+
+# Fast: Quick experiments (~15-30 min)
+fast:
+  description: "Fast experiments (~15-30 min)"
+  model:
+    dim: 384
+    n_layers: 6
+    n_heads: 6
+    n_kv_heads: 3
+    dropout: 0.1
+  data:
+    seq_len: 256
+    batch_size: 16
+  training:
+    epochs: 10
+    learning_rate: 0.0005
+    weight_decay: 0.1
+    gradient_accumulation_steps: 4
+    warmup_steps: 200
+    max_grad_norm: 1.0
+  checkpointing:
+    save_every_n_epochs: 5
+
+# Moderate: Balanced training (~1-2 hours)
+moderate:
+  description: "Balanced training (~1-2 hours)"
+  model:
+    dim: 512
+    n_layers: 8
+    n_heads: 8
+    n_kv_heads: 4
+    dropout: 0.1
+  data:
+    seq_len: 384
+    batch_size: 16
+  training:
+    epochs: 30
+    learning_rate: 0.0003
+    weight_decay: 0.1
+    gradient_accumulation_steps: 4
+    warmup_steps: 500
+    max_grad_norm: 1.0
+  checkpointing:
+    save_every_n_epochs: 5
+
+# Full: Maximum performance training (~4-8 hours)
+full:
+  description: "Full training run (~4-8 hours)"
+  model:
+    dim: 512
+    n_layers: 8
+    n_heads: 8
+    n_kv_heads: 4
+    dropout: 0.1
+  data:
+    seq_len: 512
+    batch_size: 12
+  training:
+    epochs: 100
+    learning_rate: 0.0003
+    weight_decay: 0.1
+    gradient_accumulation_steps: 6
+    warmup_steps: 1000
+    max_grad_norm: 1.0
+  checkpointing:
+    save_every_n_epochs: 10
+
+# Heavy: Maximum model size for 12GB VRAM
+heavy:
+  description: "Maximum model size for 12GB VRAM (~8+ hours)"
+  model:
+    dim: 640
+    n_layers: 10
+    n_heads: 10
+    n_kv_heads: 5
+    dropout: 0.1
+  data:
+    seq_len: 384
+    batch_size: 8
+  training:
+    epochs: 100
+    learning_rate: 0.0002
+    weight_decay: 0.1
+    gradient_accumulation_steps: 8
+    warmup_steps: 1000
+    max_grad_norm: 1.0
+  checkpointing:
+    save_every_n_epochs: 10

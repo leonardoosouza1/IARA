@@ -1,0 +1,36 @@
+services:
+  saci-brain:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: saci_trader_bot
+    restart: unless-stopped
+    
+    # Mapeamento de Volumes
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./checkpoints:/app/checkpoints
+    
+    # Shared Memory (Critical for PyTorch DataLoader with Workers)
+    shm_size: '8gb'
+      
+    # Configurações Críticas para AMD ROCm (RX 6750 XT)
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_PTRACE
+      
+    # Variável Mágica para RDNA2 (Sua GPU)
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=10.3.0
+      - PYTHONPATH=/app
+    
+    stdin_open: true
+    tty: true

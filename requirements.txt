@@ -1,0 +1,16 @@
+# Data Engineering
+polars
+pyarrow
+
+# Technical Analysis (requer TA-Lib C instalado)
+ta-lib
+
+# Data Source
+yfinance
+
+# AI Core
+einops
+
+# Utilities
+tqdm
+PyYAML
