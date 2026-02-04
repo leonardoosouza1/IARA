@@ -113,6 +113,7 @@ def load_test_data(
 
 
 
+from src.trading.active_inference import ActiveInferenceModule
 
 @torch.no_grad()
 def evaluate(
@@ -122,19 +123,22 @@ def evaluate(
     device: torch.device,
     seq_len: int = 64
 ) -> dict:
-    """Evaluate model on test data."""
+    """Evaluate model on test data using Active Inference (Dynamic Thresholds)."""
     model.eval()
     
     n_samples = len(features) - seq_len
     if n_samples <= 0:
         raise ValueError(f"Not enough samples. Need at least {seq_len + 1}")
     
+    # Initialize Feedback Loop
+    active_brain = ActiveInferenceModule()
+    
     predictions = []
+    skipped = 0
+    active_decisions = []
     
     for i in range(n_samples):
         # Create sequence
-        # We start at i, go to i+seq_len
-        # x shape: [1, seq_len, features]
         x = torch.tensor(features[i:i + seq_len], dtype=torch.float32).unsqueeze(0).to(device)
         
         # Forward pass
@@ -143,47 +147,65 @@ def evaluate(
         
         # Probabilities
         probs = torch.sigmoid(logits)
-        pred_prob = probs.cpu().item() # Last step prob
+        pred_prob = probs.cpu().item() 
         
-        # Predictions
-        pred_cls = 1.0 if pred_prob > 0.5 else 0.0
-        confidence = abs(pred_prob - 0.5) * 2  # 0 to 1
+        # Get Dynamic Decision
+        decision = active_brain.get_decision(pred_prob)
         
         # True value
-        # The target for the sequence ending at `i+seq_len` is at index `i+seq_len-1`
-        # Because in dataset we setup: x[0..64] -> predict target[63] (which is trend T+1..T+5)
-        # Wait, trainer uses: raw_target = targets[end_row - 1]
-        # end_row is start + seq_len. So target index is start + seq_len - 1.
-        # Here `start` corresponds to `i`.
         true_idx = i + seq_len - 1
         true_cls_val = target_cls[true_idx]
+        
+        # Log to Active Brain for Calibration (Simulate Feedback)
+        active_brain.log_prediction(pred_prob, true_cls_val)
+        
+        # Determine Prediction Class based on Decision
+        if decision == "BUY":
+            pred_cls = 1.0
+        elif decision == "SELL":
+            pred_cls = 0.0
+        else:
+            pred_cls = -1.0 # Waited
+            skipped += 1
+            
+        confidence = abs(pred_prob - 0.5) * 2
         
         predictions.append({
             "true_cls": true_cls_val,
             "pred_prob": pred_prob,
             "pred_cls": pred_cls,
-            "confidence": confidence
+            "decision": decision,
+            "confidence": confidence,
+            "threshold": active_brain.current_threshold
         })
+        
+        if pred_cls != -1.0:
+            active_decisions.append((true_cls_val, pred_cls))
     
-    # Calculate Metrics
-    true_classes = [p["true_cls"] for p in predictions]
-    pred_classes = [p["pred_cls"] for p in predictions]
-    pred_probs = [p["pred_prob"] for p in predictions]
-    
-    tp = sum(1 for t, p in zip(true_classes, pred_classes) if t == 1 and p == 1)
-    tn = sum(1 for t, p in zip(true_classes, pred_classes) if t == 0 and p == 0)
-    fp = sum(1 for t, p in zip(true_classes, pred_classes) if t == 0 and p == 1)
-    fn = sum(1 for t, p in zip(true_classes, pred_classes) if t == 1 and p == 0)
-    
-    accuracy = (tp + tn) / len(predictions) * 100 if predictions else 0
-    precision = tp / (tp + fp) * 100 if (tp + fp) > 0 else 0
-    recall = tp / (tp + fn) * 100 if (tp + fn) > 0 else 0
-    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-    
-    try:
-        auc = roc_auc_score(true_classes, pred_probs)
-    except:
-        auc = 0.5
+    # Calculate Metrics (Only for Traded Samples)
+    if active_decisions:
+        true_classes = [t for t, p in active_decisions]
+        pred_classes = [p for t, p in active_decisions]
+        
+        tp = sum(1 for t, p in zip(true_classes, pred_classes) if t == 1 and p == 1)
+        tn = sum(1 for t, p in zip(true_classes, pred_classes) if t == 0 and p == 0)
+        fp = sum(1 for t, p in zip(true_classes, pred_classes) if t == 0 and p == 1)
+        fn = sum(1 for t, p in zip(true_classes, pred_classes) if t == 1 and p == 0)
+        
+        accuracy = (tp + tn) / len(active_decisions) * 100
+        precision = tp / (tp + fp) * 100 if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) * 100 if (tp + fn) > 0 else 0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        
+        # AUC needs probs, filtered
+        traded_probs = [p["pred_prob"] for p in predictions if p["pred_cls"] != -1.0]
+        try:
+            auc = roc_auc_score(true_classes, traded_probs)
+        except:
+            auc = 0.5
+    else:
+        accuracy, precision, recall, f1, auc = 0, 0, 0, 0, 0
+        tp, tn, fp, fn = 0, 0, 0, 0
     
     return {
         "accuracy": accuracy,
@@ -193,6 +215,8 @@ def evaluate(
         "auc": auc,
         "confusion_matrix": {"TP": tp, "TN": tn, "FP": fp, "FN": fn},
         "n_samples": n_samples,
+        "n_traded": len(active_decisions),
+        "n_skipped": skipped,
         "predictions": predictions
     }
 
@@ -253,14 +277,17 @@ def main():
     
     # Print results
     print("\n" + "=" * 60)
-    print(f"I.A.R.A. Evaluation Results - {args.ticker}")
+    print(f"I.A.R.A. v6.4 Evaluation Results - {args.ticker}")
     print("=" * 60)
     print(f"Samples Evaluated: {results['n_samples']}")
-    print(f"Accuracy:  {results['accuracy']:.2f}%")
-    print(f"AUC:       {results['auc']:.4f}")
-    print(f"Precision: {results['precision']:.2f}%")
-    print(f"Recall:    {results['recall']:.2f}%")
-    print(f"F1 Score:  {results['f1']:.4f}")
+    print(f"Trades Executed:   {results['n_traded']} ({results['n_traded']/results['n_samples']*100:.1f}%)")
+    print(f"Signals Skipped:   {results['n_skipped']} (Volatile/Low Conf)")
+    print("-" * 60)
+    print(f"Active Accuracy: {results['accuracy']:.2f}%")
+    print(f"AUC:             {results['auc']:.4f}")
+    print(f"Precision:       {results['precision']:.2f}%")
+    print(f"Recall:          {results['recall']:.2f}%")
+    print(f"F1 Score:        {results['f1']:.4f}")
     print("-" * 60)
     cm = results["confusion_matrix"]
     print(f"Confusion Matrix: [TP={cm['TP']}, TN={cm['TN']}, FP={cm['FP']}, FN={cm['FN']}]")

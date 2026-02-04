@@ -23,19 +23,7 @@ import torch.nn as nn
 
 from src.model.iara_liquid import IARA, LiquidConfig
 from src.data.processor import process_single_asset, Normalizer, NormalizerState
-from src.analysis.active_learning import ActiveLearner
-
-# Pickle Patch: dataset was saved with processor.py as __main__, so it expects NormalizerState in __main__
-import sys
-sys.modules['__main__'].NormalizerState = NormalizerState
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
-
-# Paths
-CHECKPOINT_DIR = Path(__file__).parent.parent.parent / "checkpoints"
-DATA_DIR = Path(__file__).parent.parent.parent / "data"
+from src.trading.active_inference import ActiveInferenceModule
 
 @dataclass
 class TradeSignal:
@@ -47,30 +35,26 @@ class TradeSignal:
     rsi: float
     threshold_check: bool
     adaptive_threshold: float  # Include validation info based on regime
+    stability_check: str
 
 class SignalEngine:
     def __init__(self, checkpoint_path: str, thresholds: Dict[str, float] = None):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Adaptive Threshold Logic
-        self.learner = ActiveLearner()
-        self.adaptive_threshold = self.learner.get_adaptive_threshold()
+        # v6.4 Active Feedback
+        self.active_brain = ActiveInferenceModule()
+        self.output_threshold = self.active_brain.current_threshold
         
-        # Fallback to manual if provided, else use adaptive
-        manual_thresh = thresholds.get("threshold", 0.60) if thresholds else 0.60
-        
-        # We prioritize Adaptive unless manual is strictly enforced (could differ in prod logic)
-        # For now, let's use Adaptive
-        self.output_threshold = self.adaptive_threshold
-        logger.info(f"Signal Engine initialized. Adaptive Threshold: {self.output_threshold:.2f}")
+        logger.info(f"Signal Engine initialized. Active Threshold: {self.output_threshold:.2f}")
         
         self._load_model(checkpoint_path)
         self._load_normalizer()
         
         # Enable optimizations
         torch.set_float32_matmul_precision('high')
-        
+
     def _load_model(self, path: str):
+        # ... existing ... (Kept as is, but showing start for context)
         logger.info(f"Loading Signal Model from {path}...")
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.config = checkpoint['config']
@@ -79,7 +63,7 @@ class SignalEngine:
             input_dim=self.config.input_dim,
             hidden_dim=self.config.hidden_dim,
             num_heads=self.config.num_heads,
-            dropout=self.config.dropout, # Dropout inactive in eval, but needed for init
+            dropout=self.config.dropout, 
             max_seq_len=self.config.max_seq_len
         )
         
@@ -94,7 +78,6 @@ class SignalEngine:
         logger.info("Model loaded and optimized.")
 
     def _load_normalizer(self):
-        # We need the Normalizer to scale live data exactly like training data
         try:
             self.normalizer = Normalizer.load(DATA_DIR / "scaler.pkl")
             logger.info("Normalizer loaded.")
@@ -103,64 +86,28 @@ class SignalEngine:
             raise
 
     def process_live_data(self, parquet_path: Path) -> Tuple[torch.Tensor, float, float]:
-        """
-        Mimics training preprocessing for a single live file.
-        Returns: (Tensor [1, Seq, Feat], Current ADX, Current RSI)
-        """
-        # 1. Feature Engineering (RSI, ADX, etc.)
-        # This function re-calculates indicators from raw OHLC
-        # In a real API setting, we would append the new candle to a buffer and update.
-        # Here we re-process the file.
+        # Mimic training preprocessing logic
         df = process_single_asset(parquet_path)
+        if df is None: raise ValueError("Data processing failed")
         
-        if df is None:
-            raise ValueError("Data processing failed")
-            
-        # 2. Extract Features
-        # Select Normalized Columns - using the EXACT names/order from the fitted normalizer
         feature_cols = self.normalizer.feature_names
-        
-        # Validate columns exist
-        missing = [c for c in feature_cols if c not in df.columns]
-        if missing:
-            raise ValueError(f"Missing features in live data: {missing}")
-            
-        # Extract numpy array for scaler
         features_np = df.select(feature_cols).to_numpy()
-        
-        # Transform
         features_norm_np = self.normalizer.transform(features_np)
         
-        # Create normalized dataframe columns
-        norm_exprs = [
-            pl.Series(f"{col}_norm", features_norm_np[:, i]) 
-            for i, col in enumerate(feature_cols)
-        ]
-        
+        norm_exprs = [pl.Series(f"{col}_norm", features_norm_np[:, i]) for i, col in enumerate(feature_cols)]
         df_norm = df.with_columns(norm_exprs)
         
-        # Select only the normalized columns for model input
-        norm_cols = [f"{c}_norm" for c in feature_cols]
-        # Ensure alphabetical sort if that's what the model expects (MultiAssetDataset logic)
-        norm_cols = sorted(norm_cols)
+        norm_cols = sorted([f"{c}_norm" for c in feature_cols])
         
-        # Verify dimension
-        if len(norm_cols) != self.config.input_dim:
-            logger.warning(f"Dimension mismatch! Model expects {self.config.input_dim}, got {len(norm_cols)}")
-        
-        # Get last sequence
         seq_len = self.config.max_seq_len
-        if len(df_norm) < seq_len:
-            raise ValueError(f"Not enough data: {len(df_norm)} < {seq_len}")
-            
         recent_data = df_norm.select(norm_cols).tail(seq_len).to_numpy().astype(np.float32)
         
-        # Extract metadata (raw values for reporting) used for filters
+        # Metadata
         last_row = df.tail(1)
         current_adx = last_row["adx"].item()
         current_rsi = last_row["rsi"].item()
         
-        tensor = torch.tensor(recent_data).unsqueeze(0).to(self.device) # [1, Seq, Feat]
+        tensor = torch.tensor(recent_data).unsqueeze(0).to(self.device)
         return tensor, current_adx, current_rsi
 
     def predict(self, ticker: str, data_path: Path) -> TradeSignal:
@@ -172,32 +119,33 @@ class SignalEngine:
                     logits, _ = self.model(input_tensor)
                     prob = torch.sigmoid(logits).item()
             
-            # Logic
-            direction = "WAIT"
-            check = False
+            # v6.4 Active Decision
+            # Feed result to Active Brain (In production, we would feed actual outcome too)
+            # For now, we update the prediction history.
+            # Ideally, a separate process calls active_brain.log_prediction(prob, actual_outcome)
             
-            # Calibration Threshold
-            if prob > self.output_threshold:
-                direction = "BUY"
-                check = True
-            elif prob < (1 - self.output_threshold):
-                direction = "SELL"
-                check = True
-                
-            # Filters (Example: Don't trade if ADX < 20)
+            decision = self.active_brain.get_decision(prob)
+            
+            # Filter Logic
+            check = (decision != "WAIT")
+            if "Volatile" in decision:
+                check = False
+            
+            # Additional Filters
             if adx < 20: 
                 check = False
-                direction = f"{direction} (WK TREND)"
+                decision = f"{decision} (WK TREND)"
                 
             return TradeSignal(
                 timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
                 ticker=ticker,
-                direction=direction,
+                direction=decision,
                 confidence=prob,
                 adx=adx,
                 rsi=rsi,
                 threshold_check=check,
-                adaptive_threshold=self.adaptive_threshold
+                adaptive_threshold=self.active_brain.current_threshold,
+                stability_check="OK" if "Volatile" not in decision else "UNSTABLE"
             )
             
         except Exception as e:

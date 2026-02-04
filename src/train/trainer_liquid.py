@@ -365,6 +365,16 @@ class Trainer:
         self.epoch = self.start_epoch
         self.best_val_auc = checkpoint.get('best_val_auc', 0.0)
         
+        # Load Memory State (v6.3)
+        if 'memory_state' in checkpoint:
+            mem = checkpoint['memory_state']
+            self.sample_loss_ema = mem.get('loss_ema', self.sample_loss_ema).cpu()
+            self.chronic_counter = mem.get('chronic', self.chronic_counter).cpu()
+            self.mastered_counter = mem.get('mastered', self.mastered_counter).cpu()
+            self.noise_mask = mem.get('noise', self.noise_mask).cpu()
+            self.epoch_losses_history = mem.get('history', self.epoch_losses_history).cpu()
+            logger.info(f"Restored Selective Memory: {self.chronic_counter.gt(0).sum()} chronic, {self.mastered_counter.gt(0).sum()} mastered")
+            
         logger.info(f"Resumed at Epoch {self.start_epoch}, Best AUC: {self.best_val_auc:.4f}")
 
     def _run_epoch(self, loader: DataLoader, training: bool, desc: str = "") -> Dict[str, float]:
@@ -445,31 +455,39 @@ class Trainer:
             'optimizer': self.optimizer.state_dict(),
             'scheduler': self.scheduler.state_dict(),
             'config': self.config,
-            'best_val_auc': self.best_val_auc
+            'best_val_auc': self.best_val_auc,
+            'memory_state': {
+                'loss_ema': self.sample_loss_ema,
+                'chronic': self.chronic_counter,
+                'mastered': self.mastered_counter,
+                'noise': self.noise_mask,
+                'history': self.epoch_losses_history
+            }
         }, self.config.checkpoint_dir / filename)
 
 
     def update_sampler_weights(self):
         """
-        Hard Example Mining with MEMORY:
-        Uses Exponential Moving Average (EMA) of loss to track difficulty over time.
-        - Persistent errors -> High weight (Drill it!)
-        - Consistent success -> Low weight (Skip it, I know this)
-        - Lucky guess -> Medium weight (I still remember you struggled before)
+        Selective Hard Mining (v6.3):
+        - updates Exponential Moving Average (EMA) of loss.
+        - detects Chronic Errors (consistent high loss).
+        - detects Mastered Lessons (consistent high confidence correct).
+        - discards Market Noise (consistent extreme loss).
         """
         self.model.eval()
         losses = []
+        accuracies = []
         
         train_subset = self.train_loader.dataset
         eval_loader = DataLoader(
             train_subset,
             batch_size=self.config.batch_size * 2,
-            shuffle=False, # Crucial: Must match index order of self.sample_loss_memory
+            shuffle=False, # Crucial: Must match index order
             num_workers=self.config.num_workers,
             pin_memory=True
         )
         
-        logger.info("Deep Thought: Analyzing 10-epoch history + Current errors...")
+        logger.info("Deep Thought: Analyzing difficulty spectrum (Selective Memory)...")
         
         with torch.no_grad():
             with torch.amp.autocast('cuda'):
@@ -479,26 +497,87 @@ class Trainer:
                     loss = nn.BCEWithLogitsLoss(reduction='none')(logits.squeeze(), y)
                     losses.append(loss.cpu())
                     
+                    # Check Correctness for Mastery
+                    probs = torch.sigmoid(logits.squeeze())
+                    preds = (probs > 0.5).float()
+                    correct = (preds == y).float()
+                    
+                    # High Confidence Correct? (>0.6 or <0.4)
+                    confident = ((probs > 0.6) | (probs < 0.4)).float()
+                    mastered_batch = correct * confident
+                    accuracies.append(mastered_batch.cpu())
+                    
         current_losses = torch.cat(losses)
+        current_mastered = torch.cat(accuracies)
         
-        # Update Memory (EMA)
-        # New Memory = (Alpha * Old Memory) + ((1-Alpha) * Current Loss)
-        if hasattr(self, 'sample_loss_memory') and len(self.sample_loss_memory) == len(current_losses):
-             self.sample_loss_memory = (self.memory_alpha * self.sample_loss_memory) + ((1 - self.memory_alpha) * current_losses)
+        # 1. Update Losses History (EMA)
+        if hasattr(self, 'sample_loss_ema') and len(self.sample_loss_ema) == len(current_losses):
+             self.sample_loss_ema = (self.memory_alpha * self.sample_loss_ema) + ((1 - self.memory_alpha) * current_losses)
         else:
-             # Fallback if first run or size mismatch (shouldn't happen)
-             self.sample_loss_memory = current_losses
+             self.sample_loss_ema = current_losses
              
-        # Calculate sampling weights from MEMORY, not just current snapshot
-        weights = (self.sample_loss_memory + 0.05) ** 2 # Squaring amplifies focus on hard stuff
-        weights = weights / weights.sum()
+        # 2. Update Chronicity (Loss > 0.9 for consecutive epochs)
+        high_loss_mask = current_losses > 0.9
+        self.chronic_counter[high_loss_mask] += 1
+        self.chronic_counter[~high_loss_mask] = 0
         
-        top_losses = torch.topk(self.sample_loss_memory, 5).values.tolist()
-        logger.info(f"Hardest Chronicles (Avg Loss): {top_losses}")
+        # 3. Update Mastery (Confident Correct for consecutive epochs)
+        mastered_mask = current_mastered > 0.5
+        self.mastered_counter[mastered_mask] += 1
+        self.mastered_counter[~mastered_mask] = 0
+        
+        # 4. Update Noise Filter (Extreme loss > 1.2 for 10 epochs)
+        # Update rolling history matrix
+        self.epoch_losses_history = torch.roll(self.epoch_losses_history, -1, dims=1)
+        self.epoch_losses_history[:, -1] = current_losses
+        
+        # Check if ALL last 10 entries are > 1.2
+        noise_candidates = (self.epoch_losses_history > 1.2).all(dim=1)
+        # Update noise mask (Persistent Noise)
+        self.noise_mask = self.noise_mask | noise_candidates
+        
+        # 5. Calculate Weights
+        # Base weight on EMA Loss
+        weights = (self.sample_loss_ema + 0.05) ** 2
+        
+        # Boost Chronic Errors (Focus)
+        chronic_indices = self.chronic_counter >= 3
+        weights[chronic_indices] *= 3.0
+        
+        # v6.4 Self-Correction Priority
+        # Since we didn't capture 'confident errors' explicitly in the loop above in v6.3, 
+        # let's rely on the fact that High Confidence + Wrong = Very High Loss.
+        # BCE Loss for prob 0.8 vs target 0 is -log(0.2) = 1.6
+        # BCE Loss for prob 0.9 vs target 0 is -log(0.1) = 2.3
+        # So 'high_loss_mask' (>0.9) actually covers these cases naturally!
+        # v6.4 Explicit Boost: If loss > 1.5 (Very confident wrong), we multiply weight further.
+        very_high_loss = current_losses > 1.5
+        weights[very_high_loss] *= 2.0 # Extra boost for "Arrogant" errors
+        
+        # Penalize Mastered Lessons (Skip)
+        mastered_indices = self.mastered_counter >= 5
+        weights[mastered_indices] *= 0.1
+        
+        # Zero out Noise (Ignore)
+        weights[self.noise_mask] = 0.0
+        
+        # Normalize
+        weights = weights / (weights.sum() + 1e-8)
+        
+        # Stats
+        n_chronic = chronic_indices.sum().item()
+        n_mastered = mastered_indices.sum().item()
+        n_noise = self.noise_mask.sum().item()
+        n_arrogant = very_high_loss.sum().item()
+        
+        top_losses = torch.topk(self.sample_loss_ema, 5).values.tolist()
+        
+        logger.info(f"Memory Stats: {n_chronic} Chronic | {n_arrogant} 'Arrogant' Errors (Boosted) | {n_mastered} Mastered | {n_noise} Noise Discarded")
+        logger.info(f"Hardest EMA Losses: {top_losses}")
         
         sampler = WeightedRandomSampler(
             weights=weights,
-            num_samples=len(weights),
+            num_samples=len(weights), # Keep epoch size same, just change frequency
             replacement=True
         )
         
@@ -511,7 +590,7 @@ class Trainer:
             drop_last=True
         )
         
-        logger.info("Trainer: Curriculum Updated. 'I remember what you missed.'")
+        logger.info("Trainer: Curriculum Updated (v6.4 Self-Correction).")
 
     def train(self):
         logger.info("Starting Training v6.1 (AMP + Opt + Hard Mining + Auto-Rollback)...")
@@ -546,13 +625,26 @@ class Trainer:
                 self.patience_counter += 1
                 logger.info(f"  No improvement ({self.patience_counter}/{self.config.patience})")
             
-            # AUTO-ROLLBACK Logic
-            # If LR dropped (Scheduler detected plateau), restore the best model
+            # AUTO-ROLLBACK 2.0 (Weight Interpolation)
+            # If LR dropped (Scheduler detected plateau), blend current weights with best weights
             if new_lr < current_lr:
                 if best_model_state is not None:
-                    logger.info(f"  ↺ Plateau detected (LR {current_lr:.2e} -> {new_lr:.2e}). Rolling back to Best Model.")
-                    self.model.load_state_dict(best_model_state)
-                    # Send to device again just in case (load_state_dict handles it usually but safe check)
+                    logger.info(f"  ↺ Plateau detected (LR {current_lr:.2e} -> {new_lr:.2e}). Applying Auto-Rollback 2.0 (Blending 70% Best + 30% Current)...")
+                    
+                    current_state = self.model.state_dict()
+                    blended_state = {}
+                    
+                    for k, best_v in best_model_state.items():
+                        # Blend floating point weights
+                        if best_v.is_floating_point():
+                            curr_v = current_state[k] # Already on device
+                            best_v_dev = best_v.to(self.device)
+                            blended_state[k] = (0.7 * best_v_dev) + (0.3 * curr_v)
+                        else:
+                            # Keep integer buffers (e.g. step counters) from best model
+                            blended_state[k] = best_v.to(self.device)
+                            
+                    self.model.load_state_dict(blended_state)
                 else:
                     logger.warning("  LR reduced but no best model to rollback to.")
                 current_lr = new_lr
