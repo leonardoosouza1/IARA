@@ -9,6 +9,7 @@ services:
     # Mapeamento de Volumes
     volumes:
       - ./src:/app/src
+      - ./artifacts:/app/artifacts
       - ./data:/app/data
       - ./config:/app/config
       - ./checkpoints:/app/checkpoints

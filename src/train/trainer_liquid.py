@@ -1,11 +1,13 @@
 """
-Trainer for I.A.R.A. v4.4 - Label Smoothing + Attention
-=======================================================
+Trainer for I.A.R.A. v6.1 - Fractal Attention-CfC (High Volume + AMP + Optimization)
+================================================================================
 Features:
-- Label Smoothing (0.1/0.9) to prevent overconfidence
-- OneCycleLR with 0.007 peak
-- Class weighting
-- AUC-based checkpointing
+- Multi-asset training (Majors)
+- Sequence length 256
+- Mixed Precision (AMP) for 2x speedup
+- Stride Optimization (Stride 8 = 40 min shift) for 8x speedup
+- Gradient Accumulation
+- ReduceLROnPlateau Scheduler
 """
 
 import argparse
@@ -39,28 +41,32 @@ CHECKPOINT_DIR = Path(__file__).parent.parent.parent / "checkpoints"
 
 @dataclass
 class TrainerConfig:
-    """Training configuration v4.4."""
+    """Training configuration v6.1 (High Volume + AMP + Opt)."""
     
     # Data
-    seq_len: int = 64
-    batch_size: int = 128
+    seq_len: int = 256
+    stride: int = 8  # Optimized: 8x faster, 97% overlap preserved
+    batch_size: int = 768  # Tuned for AMP
+    accumulation_steps: int = 2  # Effective batch = 1536
     num_workers: int = 4
     val_split: float = 0.2
     
     # Model
-    input_dim: int = 11
-    hidden_dim: int = 512  # Increased
-    dropout: float = 0.4
+    input_dim: int = 15
+    hidden_dim: int = 512
+    num_heads: int = 4
+    dropout: float = 0.5
+    max_seq_len: int = 256
     
     # Training
-    epochs: int = 100
-    learning_rate: float = 0.005
-    max_lr: float = 0.007  # OneCycleLR peak
+    epochs: int = 200
+    learning_rate: float = 0.001
     weight_decay: float = 1e-4
     grad_clip: float = 0.5
+    resume: bool = False  # Resume flag
     
     # Label Smoothing
-    label_smooth: float = 0.1  # y_smooth = y * 0.8 + 0.1
+    label_smooth: float = 0.1
     
     # Augmentation
     noise_std: float = 0.02
@@ -68,20 +74,20 @@ class TrainerConfig:
     scale_max: float = 1.02
     
     # Early Stopping
-    patience: int = 20
+    patience: int = 40
     
     # Checkpointing
     checkpoint_dir: Path = CHECKPOINT_DIR
 
 
-class LiquidDataset(Dataset):
-    """Dataset with augmentation and label smoothing support."""
+class MultiAssetDataset(Dataset):
+    """Multi-asset dataset with support for all processed tickers."""
     
     def __init__(
         self,
         data_dir: Path = DATA_PROCESSED_DIR,
-        seq_len: int = 64,
-        stride: int = 16,
+        seq_len: int = 256,
+        stride: int = 1,
         tickers: Optional[List[str]] = None,
         target_col: str = "close_log_ret",
         augment: bool = False,
@@ -103,9 +109,10 @@ class LiquidDataset(Dataset):
         
         aug_str = " (augmented)" if augment else ""
         smooth_str = f", smooth={label_smooth}" if label_smooth > 0 else ""
-        logger.info(f"Dataset{aug_str}{smooth_str}: {len(self.indices)} samples, {len(self.feature_cols) if self.feature_cols else 0} features")
+        n_tickers = len(self.samples)
+        logger.info(f"Dataset{aug_str}{smooth_str}: {len(self.indices)} samples from {n_tickers} tickers, {len(self.feature_cols) if self.feature_cols else 0} features")
     
-    def _load_data(self, tickers: Optional[List[str]]) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    def _load_data(self, tickers: Optional[List[str]]) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray, str]]:
         parquet_files = list(self.data_dir.glob("*.parquet"))
         if tickers:
             parquet_files = [f for f in parquet_files if f.stem in tickers]
@@ -116,6 +123,7 @@ class LiquidDataset(Dataset):
         for file_path in parquet_files:
             try:
                 df = pl.read_parquet(file_path)
+                ticker = file_path.stem
                 
                 if self.target_col not in df.columns:
                     continue
@@ -134,8 +142,11 @@ class LiquidDataset(Dataset):
                 else:
                     valid_mask = np.ones(len(features), dtype=np.float32)
                 
+                features = np.nan_to_num(features, nan=0.0)
+                targets = np.nan_to_num(targets, nan=0.0)
+                
                 if len(available) == len(self.feature_cols) and len(features) > self.seq_len:
-                    data_list.append((features, targets, valid_mask))
+                    data_list.append((features, targets, valid_mask, ticker))
                 
             except Exception as e:
                 logger.error(f"Error loading {file_path}: {e}")
@@ -144,7 +155,7 @@ class LiquidDataset(Dataset):
     
     def _compute_indices(self) -> List[Tuple[int, int]]:
         indices = []
-        for i, (feats, targets, valid_mask) in enumerate(self.samples):
+        for i, (feats, targets, valid_mask, ticker) in enumerate(self.samples):
             max_start = len(feats) - self.seq_len
             if max_start < 0:
                 continue
@@ -159,7 +170,7 @@ class LiquidDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         sample_idx, start_row = self.indices[idx]
-        features, targets, _ = self.samples[sample_idx]
+        features, targets, _, _ = self.samples[sample_idx]
         
         end_row = start_row + self.seq_len
         x = torch.tensor(features[start_row:end_row], dtype=torch.float32)
@@ -172,8 +183,6 @@ class LiquidDataset(Dataset):
         raw_target = targets[end_row - 1]
         binary_target = 1.0 if raw_target > 0 else 0.0
         
-        # Label Smoothing: y_smooth = y * (1 - 2*smooth) + smooth
-        # For smooth=0.1: 0 -> 0.1, 1 -> 0.9
         if self.label_smooth > 0:
             binary_target = binary_target * (1 - 2 * self.label_smooth) + self.label_smooth
         
@@ -184,9 +193,21 @@ class LiquidDataset(Dataset):
         return len(self.feature_cols) if self.feature_cols else 0
     
     def get_chronological_split(self, val_ratio: float = 0.2) -> Tuple[List[int], List[int]]:
-        n = len(self.indices)
-        split_idx = int(n * (1 - val_ratio))
-        return list(range(split_idx)), list(range(split_idx, n))
+        train_indices = []
+        val_indices = []
+        
+        ticker_indices: Dict[int, List[int]] = {}
+        for i, (sample_idx, start_row) in enumerate(self.indices):
+            if sample_idx not in ticker_indices:
+                ticker_indices[sample_idx] = []
+            ticker_indices[sample_idx].append(i)
+        
+        for sample_idx, idx_list in ticker_indices.items():
+            split_point = int(len(idx_list) * (1 - val_ratio))
+            train_indices.extend(idx_list[:split_point])
+            val_indices.extend(idx_list[split_point:])
+        
+        return train_indices, val_indices
     
     def compute_class_weights(self, indices: List[int]) -> float:
         pos_count = 0
@@ -194,7 +215,7 @@ class LiquidDataset(Dataset):
         
         for idx in indices:
             sample_idx, start_row = self.indices[idx]
-            _, targets, _ = self.samples[sample_idx]
+            _, targets, _, _ = self.samples[sample_idx]
             end_row = start_row + self.seq_len
             
             if targets[end_row - 1] > 0:
@@ -215,8 +236,8 @@ class Trainer:
         self.config = config
         self.device = device
         
-        # Load datasets
-        full_dataset = LiquidDataset(seq_len=config.seq_len, augment=False)
+        # Load datasets (using config.stride)
+        full_dataset = MultiAssetDataset(seq_len=config.seq_len, stride=config.stride, augment=False)
         
         if full_dataset.input_dim > 0:
             config.input_dim = full_dataset.input_dim
@@ -224,16 +245,17 @@ class Trainer:
         train_idxs, val_idxs = full_dataset.get_chronological_split(config.val_split)
         pos_weight = full_dataset.compute_class_weights(train_idxs)
         
-        # Training dataset WITH label smoothing
-        train_dataset = LiquidDataset(
+        # Training dataset
+        train_dataset = MultiAssetDataset(
             seq_len=config.seq_len,
+            stride=config.stride,
             augment=True,
             noise_std=config.noise_std,
             scale_range=(config.scale_min, config.scale_max),
             label_smooth=config.label_smooth
         )
-        # Validation WITHOUT label smoothing
-        val_dataset = LiquidDataset(seq_len=config.seq_len, augment=False, label_smooth=0.0)
+        # Validation
+        val_dataset = MultiAssetDataset(seq_len=config.seq_len, stride=config.stride, augment=False, label_smooth=0.0)
         
         train_subset = Subset(train_dataset, train_idxs)
         val_subset = Subset(val_dataset, val_idxs)
@@ -257,13 +279,18 @@ class Trainer:
             pin_memory=True
         )
         
-        # Model
+        # Model v6.1 (Fractal CfC)
         liquid_config = LiquidConfig(
             input_dim=config.input_dim,
             hidden_dim=config.hidden_dim,
-            dropout=config.dropout
+            num_heads=config.num_heads,
+            dropout=config.dropout,
+            max_seq_len=config.max_seq_len
         )
         self.model = IARA(liquid_config).to(device)
+        
+        # Enable TensorFloat32 for faster matmul
+        torch.set_float32_matmul_precision('high')
         
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -272,28 +299,61 @@ class Trainer:
             weight_decay=config.weight_decay
         )
         
-        # OneCycleLR with higher peak
-        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        # Scheduler
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
-            max_lr=config.max_lr,
-            steps_per_epoch=len(self.train_loader),
-            epochs=config.epochs,
-            pct_start=0.3,
-            div_factor=10,
-            final_div_factor=100
+            mode='min',
+            factor=0.5,
+            patience=5
         )
         
-        # Loss with class weighting
+        # Loss
         pos_weight_tensor = torch.tensor([pos_weight], device=device)
         self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
         
+        # AMP Scaler
+        self.scaler = torch.amp.GradScaler('cuda')
+        
         # State
+        self.start_epoch = 0
         self.epoch = 0
         self.best_val_auc = 0.0
         self.patience_counter = 0
         
+        # Resume Logic
+        if config.resume:
+            self._resume_checkpoint()
+        
         logger.info(f"Model Parameters: {self.model.count_parameters():,}")
-        logger.info(f"Using pos_weight={pos_weight:.4f}, label_smooth={config.label_smooth}")
+        logger.info(f"Config: seq_len={config.seq_len}, stride={config.stride}, batch={config.batch_size}, AMP=True, Resume={config.resume}")
+
+    def _resume_checkpoint(self):
+        latest_path = self.config.checkpoint_dir / "latest.pth"
+        if not latest_path.exists():
+            logger.warning(f"Resume requested but {latest_path} not found. Starting fresh.")
+            return
+
+        logger.info(f"Resuming from {latest_path}...")
+        checkpoint = torch.load(latest_path, map_location=self.device, weights_only=False)
+        
+        # Load Model
+        state_dict = checkpoint['model']
+        if list(state_dict.keys())[0].startswith('_orig_mod.'):
+            state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+        self.model.load_state_dict(state_dict)
+        
+        # Load Optimizer & Scheduler
+        if 'optimizer' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+        if 'scheduler' in checkpoint:
+            self.scheduler.load_state_dict(checkpoint['scheduler'])
+            
+        # Load State
+        self.start_epoch = checkpoint['epoch'] + 1
+        self.epoch = self.start_epoch
+        self.best_val_auc = checkpoint.get('best_val_auc', 0.0)
+        
+        logger.info(f"Resumed at Epoch {self.start_epoch}, Best AUC: {self.best_val_auc:.4f}")
 
     def _run_epoch(self, loader: DataLoader, training: bool, desc: str = "") -> Dict[str, float]:
         if training:
@@ -304,34 +364,45 @@ class Trainer:
         losses, all_preds, all_targets = [], [], []
         correct, total = 0, 0
         
-        context = torch.no_grad() if not training else torch.enable_grad()
         pbar = tqdm(loader, desc=desc, leave=False) if training else loader
         
+        if training:
+            self.optimizer.zero_grad()
+        
+        context = torch.enable_grad() if training else torch.no_grad()
+        
         with context:
-            for x, y in pbar:
+            for i, (x, y) in enumerate(pbar):
                 x, y = x.to(self.device), y.to(self.device)
                 
-                logits, _ = self.model(x)
-                loss = self.criterion(logits, y)
+                # Mixed Precision Forward
+                with torch.amp.autocast('cuda'):
+                    logits, _ = self.model(x)
+                    loss = self.criterion(logits, y)
                 
                 if training:
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-                    self.optimizer.step()
-                    self.scheduler.step()
+                    scaled_loss = loss / self.config.accumulation_steps
+                    self.scaler.scale(scaled_loss).backward()
                     
-                    if isinstance(pbar, tqdm):
-                        pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{self.scheduler.get_last_lr()[0]:.2e}")
+                    if (i + 1) % self.config.accumulation_steps == 0:
+                        self.scaler.unscale_(self.optimizer)
+                        nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                        self.optimizer.zero_grad()
+                        
+                        if isinstance(pbar, tqdm):
+                            lr = self.optimizer.param_groups[0]['lr']
+                            # Multiply loss by steps to show real loss for display
+                            pbar.set_postfix(loss=f"{loss.item() * self.config.accumulation_steps:.4f}", lr=f"{lr:.2e}")
                 
                 probs = torch.sigmoid(logits)
                 preds = (probs > 0.5).float()
                 
-                # For accuracy, use hard labels (>0.5)
                 hard_y = (y > 0.5).float()
                 correct += (preds == hard_y).sum().item()
                 total += y.size(0)
-                losses.append(loss.item())
+                losses.append(loss.item() * self.config.accumulation_steps if training else loss.item())
                 
                 all_preds.extend(probs.detach().cpu().numpy())
                 all_targets.extend(hard_y.detach().cpu().numpy())
@@ -353,24 +424,31 @@ class Trainer:
 
     def save_checkpoint(self, filename="latest.pth"):
         self.config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # Handle compiled model (if applicable)
+        model_state = self.model._orig_mod.state_dict() if hasattr(self.model, '_orig_mod') else self.model.state_dict()
+        
         torch.save({
-            'model': self.model.state_dict(),
-            'config': self.config,
             'epoch': self.epoch,
+            'model': model_state,
+            'optimizer': self.optimizer.state_dict(),
+            'scheduler': self.scheduler.state_dict(),
+            'config': self.config,
             'best_val_auc': self.best_val_auc
         }, self.config.checkpoint_dir / filename)
 
     def train(self):
-        logger.info("Starting Training v4.4 (Feature Attention + Label Smoothing)...")
+        logger.info("Starting Training v6.1 (AMP + Opt)...")
         
-        for epoch in range(self.config.epochs):
+        for epoch in range(self.start_epoch, self.config.epochs):
             self.epoch = epoch
             train_m, val_m = self.train_epoch()
             
+            self.scheduler.step(val_m['loss'])
+            
             logger.info(
                 f"Epoch {epoch}: "
-                f"Train[Acc={train_m['accuracy']:.2%}, AUC={train_m['auc']:.4f}] | "
-                f"Val[Acc={val_m['accuracy']:.2%}, AUC={val_m['auc']:.4f}]"
+                f"Train[Loss={train_m['loss']:.4f}, Acc={train_m['accuracy']:.2%}, AUC={train_m['auc']:.4f}] | "
+                f"Val[Loss={val_m['loss']:.4f}, Acc={val_m['accuracy']:.2%}, AUC={val_m['auc']:.4f}]"
             )
             
             if val_m['auc'] > self.best_val_auc:
@@ -382,7 +460,8 @@ class Trainer:
                 self.patience_counter += 1
                 logger.info(f"  No improvement ({self.patience_counter}/{self.config.patience})")
             
-            self.save_checkpoint()
+            # Always save latest for resume
+            self.save_checkpoint("latest.pth")
             
             if self.patience_counter >= self.config.patience:
                 logger.info(f"Early stopping after {epoch + 1} epochs")
@@ -393,10 +472,11 @@ class Trainer:
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--patience", type=int, default=20)
-    parser.add_argument("--noise", type=float, default=0.02)
+    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, default=768)
+    parser.add_argument("--patience", type=int, default=40)
+    parser.add_argument("--seq-len", type=int, default=256)
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     return parser.parse_args()
 
 
@@ -408,7 +488,8 @@ if __name__ == "__main__":
         epochs=args.epochs,
         batch_size=args.batch_size,
         patience=args.patience,
-        noise_std=args.noise
+        seq_len=args.seq_len,
+        resume=args.resume
     )
     
     trainer = Trainer(config, device)

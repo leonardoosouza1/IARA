@@ -70,7 +70,8 @@ def load_test_data(
     ticker: str = "EURUSD",
     normalizer: Optional[Normalizer] = None,
     limit: int = 500,
-    seq_len: int = 64
+    seq_len: int = 64,
+    expected_features: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load test data for a specific ticker."""
     file_path = DATA_PROCESSED_DIR / f"{ticker}.parquet"
@@ -81,6 +82,12 @@ def load_test_data(
     
     # Dynamically detect all *_norm columns (same as trainer)
     feature_cols = sorted([c for c in df.columns if c.endswith("_norm")])
+    
+    # Filter to expected features if model was trained with fewer
+    if expected_features and len(feature_cols) > expected_features:
+        feature_cols = feature_cols[:expected_features]
+        logger.info(f"Filtered to {len(feature_cols)} features to match model")
+    
     logger.info(f"Detected {len(feature_cols)} features: {feature_cols}")
     
     # Take last N samples for testing (plus buffer for seq_len)
@@ -230,7 +237,14 @@ def main():
     # Load test data
     logger.info(f"Loading test data for {args.ticker}...")
     normalizer = Normalizer.load(SCALER_PATH)
-    features, target_reg, target_cls = load_test_data(args.ticker, normalizer, args.limit, args.seq_len)
+    
+    # Get expected features from checkpoint config
+    trainer_config = checkpoint.get('config')
+    expected_features = trainer_config.input_dim if trainer_config else None
+    
+    features, target_reg, target_cls = load_test_data(
+        args.ticker, normalizer, args.limit, args.seq_len, expected_features
+    )
     logger.info(f"Loaded {len(features)} samples, {features.shape[1]} features")
     
     # Evaluate
