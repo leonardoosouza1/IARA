@@ -12,6 +12,7 @@ services:
       - ./artifacts:/app/artifacts
       - ./data:/app/data
       - ./config:/app/config
+      - ./logs:/app/logs
       - ./checkpoints:/app/checkpoints
       - ./reports:/app/reports
     

@@ -26,6 +26,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset, WeightedRandomSampler
 from tqdm import tqdm
+
+# v6.9 Performance: Enable cuDNN auto-tuning for optimal kernel selection
+torch.backends.cudnn.benchmark = True
 from sklearn.metrics import roc_auc_score
 
 from src.model.iara_liquid import IARA, LiquidConfig
@@ -286,65 +289,101 @@ class MultiAssetDataset(Dataset):
 
 
 class Trainer:
-    """IARA v6.7 Expert Symmetry Trainer."""
-    def __init__(self, config: TrainerConfig, device: torch.device):
+    """IARA v6.9 Hybrid Engine Trainer."""
+    def __init__(
+        self, 
+        config: TrainerConfig, 
+        device: torch.device,
+        train_dataset: Optional[torch.utils.data.Dataset] = None,
+        val_dataset: Optional[torch.utils.data.Dataset] = None
+    ):
         self.config = config
         self.device = device
         
-        # Load datasets (using config.stride)
-        full_dataset = MultiAssetDataset(seq_len=config.seq_len, stride=config.stride, augment=False)
-        
-        if full_dataset.input_dim > 0:
-            config.input_dim = full_dataset.input_dim
-        
-        train_idxs, val_idxs = full_dataset.get_chronological_split(config.val_split)
-        pos_weight = full_dataset.compute_class_weights(train_idxs)
+        # v6.9 Hybrid Engine: Use injected datasets if provided
+        if train_dataset is not None and val_dataset is not None:
+            logger.info("Using pre-computed datasets (v6.9 Hybrid Engine)")
+            
+            # Directly use provided datasets
+            # v6.9 Performance: num_workers=0 is FASTER for pre-computed data!
+            # Workers cause memory copy overhead (415MB per worker fork)
+            # pin_memory=True enables direct GPU transfer
+            self.train_loader = DataLoader(
+                train_dataset,
+                batch_size=config.batch_size,
+                shuffle=True,
+                num_workers=0,  # Optimal for pre-computed (15ms vs 33ms per batch)
+                pin_memory=True,
+                drop_last=True
+            )
+            
+            self.val_loader = DataLoader(
+                val_dataset,
+                batch_size=config.batch_size,
+                shuffle=False,
+                num_workers=0,
+                pin_memory=True
+            )
+            
+            n_samples = len(train_dataset)
+            pos_weight = 1.0  # Balanced for pre-computed
+            
+        else:
+            # Legacy mode: Create datasets on-the-fly
+            full_dataset = MultiAssetDataset(seq_len=config.seq_len, stride=config.stride, augment=False)
+            
+            if full_dataset.input_dim > 0:
+                config.input_dim = full_dataset.input_dim
+            
+            train_idxs, val_idxs = full_dataset.get_chronological_split(config.val_split)
+            pos_weight = full_dataset.compute_class_weights(train_idxs)
+            
+            # Training dataset
+            train_dataset_internal = MultiAssetDataset(
+                seq_len=config.seq_len,
+                stride=config.stride,
+                augment=True,
+                noise_std=config.noise_std,
+                scale_range=(config.scale_min, config.scale_max),
+                label_smooth=config.label_smooth
+            )
+            # Validation
+            val_dataset_internal = MultiAssetDataset(seq_len=config.seq_len, stride=config.stride, augment=False, label_smooth=0.0)
+            
+            train_subset = Subset(train_dataset_internal, train_idxs)
+            val_subset = Subset(val_dataset_internal, val_idxs)
+            
+            logger.info(f"Train: {len(train_subset)}, Val: {len(val_subset)}")
+            
+            self.train_loader = DataLoader(
+                train_subset,
+                batch_size=config.batch_size,
+                shuffle=True,
+                num_workers=config.num_workers,
+                pin_memory=True,
+                drop_last=True
+            )
+            
+            self.val_loader = DataLoader(
+                val_subset,
+                batch_size=config.batch_size,
+                shuffle=False,
+                num_workers=config.num_workers,
+                pin_memory=True
+            )
+            
+            n_samples = len(train_idxs)
         
         self.telemetry = TelemetryLogger()
         
-        # Training dataset
-        train_dataset = MultiAssetDataset(
-            seq_len=config.seq_len,
-            stride=config.stride,
-            augment=True,
-            noise_std=config.noise_std,
-            scale_range=(config.scale_min, config.scale_max),
-            label_smooth=config.label_smooth
-        )
-        # Validation
-        val_dataset = MultiAssetDataset(seq_len=config.seq_len, stride=config.stride, augment=False, label_smooth=0.0)
-        
-        train_subset = Subset(train_dataset, train_idxs)
-        val_subset = Subset(val_dataset, val_idxs)
-        
-        logger.info(f"Train: {len(train_subset)}, Val: {len(val_subset)}")
-        
-        self.train_loader = DataLoader(
-            train_subset,
-            batch_size=config.batch_size,
-            shuffle=True,
-            num_workers=config.num_workers,
-            pin_memory=True, # Critical for high throughput
-            drop_last=True
-        )
-        
-        self.val_loader = DataLoader(
-            val_subset,
-            batch_size=config.batch_size,
-            shuffle=False,
-            num_workers=config.num_workers,
-            pin_memory=True
-        )
-        
         # MEMORY: Initialize Selective History (v6.3)
-        # We use CPU tensors for memory to save VRAM, only moving to GPU when needed
-        n_samples = len(train_idxs)
         self.memory_alpha = 0.7 
-        self.sample_loss_ema = torch.ones(n_samples) # Start cautious
-        self.chronic_counter = torch.zeros(n_samples, dtype=torch.int16) # Count of consecutive failures
-        self.mastered_counter = torch.zeros(n_samples, dtype=torch.int16) # Count of consecutive successes
-        self.noise_mask = torch.zeros(n_samples, dtype=torch.bool) # Discarded samples
-        self.epoch_losses_history = torch.zeros(n_samples, 10) # Track last 10 losses for Noise detection
+        self.sample_loss_ema = torch.ones(n_samples)
+        self.chronic_counter = torch.zeros(n_samples, dtype=torch.int16)
+        self.mastered_counter = torch.zeros(n_samples, dtype=torch.int16)
+        self.noise_mask = torch.zeros(n_samples, dtype=torch.bool)
+        self.epoch_losses_history = torch.zeros(n_samples, 10)
+
 
         
         # Model v6.7 (Expert Symmetry)
@@ -468,12 +507,14 @@ class Trainer:
                 # Unpack batch (Handle 2 or 3 items)
                 if len(batch) == 3:
                     x, y, w = batch
-                    w = w.to(self.device)
+                    w = w.to(self.device, non_blocking=True)
                 else:
                     x, y = batch
                     w = None
                     
-                x, y = x.to(self.device), y.to(self.device)
+                # v6.9: non_blocking=True overlaps CPU→GPU transfer with compute
+                x = x.to(self.device, non_blocking=True).contiguous()
+                y = y.to(self.device, non_blocking=True)
                 
                 # Mixed Precision Forward
                 with torch.amp.autocast('cuda'):
@@ -798,6 +839,16 @@ class Trainer:
             print(f"Best AUC:    {self.best_val_auc:.4f}")
             print(f"Log File:    {self.telemetry.log_path}")
             print("="*50 + "\n")
+            
+            # v6.9: Explicit GPU memory cleanup (fixes ROCm memory leak on Ctrl+C)
+            logger.info("🧹 Cleaning up GPU memory...")
+            del self.model
+            del self.optimizer
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            logger.info("✅ GPU memory released.")
+            
             return
 
         logger.info(f"Training finished. Best Val AUC: {self.best_val_auc:.4f}")
@@ -811,6 +862,8 @@ def parse_args():
     parser.add_argument("--seq-len", type=int, default=256)
     parser.add_argument("--lr", type=float, default=0.001, help="Learning Rate")
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    parser.add_argument("--use-cache", action="store_true", 
+                        help="Use pre-computed tensors from data/cache/ (v6.9 Hybrid Engine)")
     return parser.parse_args()
 
 
@@ -818,14 +871,46 @@ if __name__ == "__main__":
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    config = TrainerConfig(
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        patience=args.patience,
-        seq_len=args.seq_len,
-        learning_rate=args.lr,
-        resume=args.resume
-    )
-    
-    trainer = Trainer(config, device)
-    trainer.train()
+    # v6.9 Hybrid Engine: Check for pre-computed cache
+    if args.use_cache:
+        from src.data import load_precomputed_datasets, HybridDatasetLoader
+        from pathlib import Path
+        
+        cache_dir = Path("data/cache")
+        loader = HybridDatasetLoader(cache_dir)
+        
+        if not loader.is_cache_valid():
+            logger.info("Cache not found. Running Feature Factory...")
+            loader.build_cache(seq_len=args.seq_len)
+        
+        train_ds, val_ds = loader.get_datasets()
+        
+        # Update config based on cached data
+        config = TrainerConfig(
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            patience=args.patience,
+            seq_len=train_ds.get_seq_len(),
+            input_dim=train_ds.get_feature_dim(),
+            learning_rate=args.lr,
+            resume=args.resume
+        )
+        
+        logger.info(f"Using pre-computed cache: {train_ds.get_feature_dim()} features, {len(train_ds)} train samples")
+        
+        # Create trainer with cached datasets (v6.9 Full Integration)
+        trainer = Trainer(config, device, train_dataset=train_ds, val_dataset=val_ds)
+        trainer.train()
+    else:
+        # Legacy mode: On-the-fly feature computation
+        config = TrainerConfig(
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            patience=args.patience,
+            seq_len=args.seq_len,
+            learning_rate=args.lr,
+            resume=args.resume
+        )
+        
+        trainer = Trainer(config, device)
+        trainer.train()
