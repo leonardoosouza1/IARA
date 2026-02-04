@@ -53,7 +53,7 @@ docker compose build
 ```
 
 ### 3. Usage
-All commands are run inside the Docker container for consistency.
+All commands are run inside the Docker container.
 
 #### Start the Container
 ```bash
@@ -65,26 +65,40 @@ Process raw parquet files (Ohlc data) into model-ready features.
 ```bash
 docker compose exec saci-brain python src/data/processor.py
 ```
-*Input: `data/raw/*.parquet` | Output: `data/processed/*.parquet` + `data/scaler.pkl`*
 
-#### B. Training
-Train the I.A.R.A. model on processed data.
+#### B. Training (Standard)
+Train the Agile I.A.R.A. model from scratch.
 ```bash
 docker compose exec saci-brain python src/train/trainer_liquid.py \
     --epochs 200 \
-    --batch-size 512 \
+    --batch-size 1024 \
     --seq-len 256
 ```
-*checkpoints are saved to `checkpoints/`*
+*Features: Auto-Rollback, Hard Mining enabled by default.*
 
-#### C. Inference (Testing)
-Evaluate the model's performance on a specific pair.
+#### C. Fine-Tuning (Polishing)
+Refine a trained model with lower learning rate.
 ```bash
-docker compose exec saci-brain python src/train/inference_liquid.py \
-    --ticker EURUSD \
-    --checkpoint best_model.pth \
-    --limit 1000
+# 1. Rollback to best state
+docker compose exec saci-brain cp checkpoints/best_model.pth checkpoints/latest.pth
+
+# 2. Resume with low LR
+docker compose exec saci-brain python src/train/trainer_liquid.py \
+    --epochs 100 \
+    --batch-size 1024 \
+    --lr 0.0001 \
+    --resume
 ```
+
+#### D. Signal Generation (Production)
+Generate live trading signals with Active Learning adaptation.
+```bash
+docker compose exec saci-brain python src/trading/signal_generator.py \
+    --ticker EURUSD \
+    --path data/raw/EURUSD.parquet
+```
+*Output: JSON signal with confidence, direction, and regime adjustment.*
+
 
 ---
 

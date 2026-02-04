@@ -21,7 +21,7 @@ import numpy as np
 import polars as pl
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader, Subset, WeightedRandomSampler
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
 
@@ -44,18 +44,19 @@ class TrainerConfig:
     """Training configuration v6.1 (High Volume + AMP + Opt)."""
     
     # Data
+    # Data
     seq_len: int = 256
-    stride: int = 8  # Optimized: 8x faster, 97% overlap preserved
-    batch_size: int = 768  # Tuned for AMP
-    accumulation_steps: int = 2  # Effective batch = 1536
+    stride: int = 2  # v6.2 Tuning: Stride 2 for 4x data volume vs stride 8
+    batch_size: int = 1024  # Increased batch for smaller model
+    accumulation_steps: int = 1 
     num_workers: int = 4
     val_split: float = 0.2
     
-    # Model
+    # Model (Simplified for Convergence)
     input_dim: int = 15
-    hidden_dim: int = 512
+    hidden_dim: int = 64  # Reduced from 512 to prevent overfitting on noise
     num_heads: int = 4
-    dropout: float = 0.5
+    dropout: float = 0.3 # Reduced dropout
     max_seq_len: int = 256
     
     # Training
@@ -279,6 +280,17 @@ class Trainer:
             pin_memory=True
         )
         
+        # MEMORY: Initialize Selective History (v6.3)
+        # We use CPU tensors for memory to save VRAM, only moving to GPU when needed
+        n_samples = len(train_idxs)
+        self.memory_alpha = 0.7 
+        self.sample_loss_ema = torch.ones(n_samples) # Start cautious
+        self.chronic_counter = torch.zeros(n_samples, dtype=torch.int16) # Count of consecutive failures
+        self.mastered_counter = torch.zeros(n_samples, dtype=torch.int16) # Count of consecutive successes
+        self.noise_mask = torch.zeros(n_samples, dtype=torch.bool) # Discarded samples
+        self.epoch_losses_history = torch.zeros(n_samples, 10) # Track last 10 losses for Noise detection
+
+        
         # Model v6.1 (Fractal CfC)
         liquid_config = LiquidConfig(
             input_dim=config.input_dim,
@@ -436,14 +448,85 @@ class Trainer:
             'best_val_auc': self.best_val_auc
         }, self.config.checkpoint_dir / filename)
 
+
+    def update_sampler_weights(self):
+        """
+        Hard Example Mining with MEMORY:
+        Uses Exponential Moving Average (EMA) of loss to track difficulty over time.
+        - Persistent errors -> High weight (Drill it!)
+        - Consistent success -> Low weight (Skip it, I know this)
+        - Lucky guess -> Medium weight (I still remember you struggled before)
+        """
+        self.model.eval()
+        losses = []
+        
+        train_subset = self.train_loader.dataset
+        eval_loader = DataLoader(
+            train_subset,
+            batch_size=self.config.batch_size * 2,
+            shuffle=False, # Crucial: Must match index order of self.sample_loss_memory
+            num_workers=self.config.num_workers,
+            pin_memory=True
+        )
+        
+        logger.info("Deep Thought: Analyzing 10-epoch history + Current errors...")
+        
+        with torch.no_grad():
+            with torch.amp.autocast('cuda'):
+                for X, y in eval_loader:
+                    X, y = X.to(self.device), y.to(self.device)
+                    logits, _ = self.model(X)
+                    loss = nn.BCEWithLogitsLoss(reduction='none')(logits.squeeze(), y)
+                    losses.append(loss.cpu())
+                    
+        current_losses = torch.cat(losses)
+        
+        # Update Memory (EMA)
+        # New Memory = (Alpha * Old Memory) + ((1-Alpha) * Current Loss)
+        if hasattr(self, 'sample_loss_memory') and len(self.sample_loss_memory) == len(current_losses):
+             self.sample_loss_memory = (self.memory_alpha * self.sample_loss_memory) + ((1 - self.memory_alpha) * current_losses)
+        else:
+             # Fallback if first run or size mismatch (shouldn't happen)
+             self.sample_loss_memory = current_losses
+             
+        # Calculate sampling weights from MEMORY, not just current snapshot
+        weights = (self.sample_loss_memory + 0.05) ** 2 # Squaring amplifies focus on hard stuff
+        weights = weights / weights.sum()
+        
+        top_losses = torch.topk(self.sample_loss_memory, 5).values.tolist()
+        logger.info(f"Hardest Chronicles (Avg Loss): {top_losses}")
+        
+        sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(weights),
+            replacement=True
+        )
+        
+        self.train_loader = DataLoader(
+            train_subset,
+            batch_size=self.config.batch_size,
+            sampler=sampler,
+            num_workers=self.config.num_workers,
+            pin_memory=True,
+            drop_last=True
+        )
+        
+        logger.info("Trainer: Curriculum Updated. 'I remember what you missed.'")
+
     def train(self):
-        logger.info("Starting Training v6.1 (AMP + Opt)...")
+        logger.info("Starting Training v6.1 (AMP + Opt + Hard Mining + Auto-Rollback)...")
+        
+        # Keep track of LR to detect reductions
+        current_lr = self.config.learning_rate
+        best_model_state = None
         
         for epoch in range(self.start_epoch, self.config.epochs):
             self.epoch = epoch
             train_m, val_m = self.train_epoch()
             
+            # Step Scheduler
             self.scheduler.step(val_m['loss'])
+            new_lr = self.optimizer.param_groups[0]['lr']
             
             logger.info(
                 f"Epoch {epoch}: "
@@ -455,10 +538,29 @@ class Trainer:
                 self.best_val_auc = val_m['auc']
                 self.patience_counter = 0
                 self.save_checkpoint("best_model.pth")
-                logger.info(f"  ✓ New best Val AUC: {self.best_val_auc:.4f}")
+                # Cache best state in RAM for quick rollback
+                # Copy is needed because state_dict is a reference
+                best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                logger.info(f"  ✓ New best Val AUC: {self.best_val_auc:.4f} (State Cached)")
             else:
                 self.patience_counter += 1
                 logger.info(f"  No improvement ({self.patience_counter}/{self.config.patience})")
+            
+            # AUTO-ROLLBACK Logic
+            # If LR dropped (Scheduler detected plateau), restore the best model
+            if new_lr < current_lr:
+                if best_model_state is not None:
+                    logger.info(f"  ↺ Plateau detected (LR {current_lr:.2e} -> {new_lr:.2e}). Rolling back to Best Model.")
+                    self.model.load_state_dict(best_model_state)
+                    # Send to device again just in case (load_state_dict handles it usually but safe check)
+                else:
+                    logger.warning("  LR reduced but no best model to rollback to.")
+                current_lr = new_lr
+                
+            # Update Sampler for next epoch (Feedback Loop)
+            # Only do this if not early stopping
+            if self.epoch < self.config.epochs - 1:
+                self.update_sampler_weights()
             
             # Always save latest for resume
             self.save_checkpoint("latest.pth")
@@ -466,6 +568,8 @@ class Trainer:
             if self.patience_counter >= self.config.patience:
                 logger.info(f"Early stopping after {epoch + 1} epochs")
                 break
+            
+
         
         logger.info(f"Training finished. Best Val AUC: {self.best_val_auc:.4f}")
 
@@ -476,6 +580,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=768)
     parser.add_argument("--patience", type=int, default=40)
     parser.add_argument("--seq-len", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=0.001, help="Learning Rate")
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     return parser.parse_args()
 
@@ -489,6 +594,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         patience=args.patience,
         seq_len=args.seq_len,
+        learning_rate=args.lr,
         resume=args.resume
     )
     
