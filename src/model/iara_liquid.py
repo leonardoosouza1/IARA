@@ -1,10 +1,11 @@
 """
-I.A.R.A. v4.1 - Closed-form Continuous (CfC) Model
-==================================================
-Features:
-- LayerNorm inside recurrent step for signal stability
-- 256 hidden units, single layer
-- Dropout 0.4 for aggressive regularization
+I.A.R.A. v4.4 - Feature Attention + Symmetric CfC
+=================================================
+New features:
+- Feature Attention Gate: dynamically mutes noisy features
+- Hidden size 512 for increased capacity
+- Symmetric Tanh gating from v4.3
+- Hidden clipping and negative output bias
 
 Reference: Hasani et al. (2022) "Closed-form Continuous-time Neural Networks"
 """
@@ -18,22 +19,49 @@ import torch.nn as nn
 
 @dataclass
 class LiquidConfig:
-    """Configuration for Liquid Neural Network v4.1."""
+    """Configuration for Liquid Neural Network v4.4."""
     
-    input_dim: int = 11           # 7 indicators + 4 time features
-    hidden_dim: int = 256         # Single wide layer
-    dropout: float = 0.4          # Aggressive regularization
-    output_dim: int = 1           # Binary classification
+    input_dim: int = 11
+    hidden_dim: int = 512  # Increased capacity
+    dropout: float = 0.4
+    output_dim: int = 1
+
+
+class FeatureAttention(nn.Module):
+    """
+    Feature Attention Gate - learns which features matter per timestep.
+    
+    Produces attention weights [0, 1] for each input feature,
+    allowing the model to mute noisy or irrelevant features
+    based on current market context.
+    """
+    
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [batch, seq_len, input_dim]
+        Returns:
+            x_attended: [batch, seq_len, input_dim]
+        """
+        attention = self.gate(x)  # [batch, seq_len, input_dim]
+        return x * attention
 
 
 class CfCCell(nn.Module):
     """
-    Closed-form Continuous (CfC) Cell v4.1 with LayerNorm.
+    Symmetric Closed-form Continuous (CfC) Cell v4.4.
     
-    The LayerNorm inside the recurrent step prevents:
-    - Vanishing gradients over long sequences
-    - Hidden state explosion
-    - Mode collapse to constant output
+    Features:
+    - Tanh gating for symmetric UP/DOWN dynamics
+    - No internal normalization
+    - Hidden state clipping
     """
     
     def __init__(self, input_dim: int, hidden_dim: int):
@@ -41,68 +69,68 @@ class CfCCell(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         
-        # Input -> Hidden projection
+        # Candidate generation
         self.linear_input = nn.Linear(input_dim, hidden_dim)
         self.linear_hidden = nn.Linear(hidden_dim, hidden_dim, bias=False)
         
-        # Time constant (tau) network
-        self.tau_input = nn.Linear(input_dim, hidden_dim)
-        self.tau_hidden = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        
-        # LayerNorm for recurrent stability (KEY for v4.1)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
+        # Symmetric gate
+        self.gate_input = nn.Linear(input_dim, hidden_dim)
+        self.gate_hidden = nn.Linear(hidden_dim, hidden_dim, bias=False)
         
         self.activation = nn.Tanh()
         
     def forward(
         self,
         input_: torch.Tensor,
-        hidden: torch.Tensor,
-        timespan: float = 1.0
+        hidden: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Args:
-            input_: [batch, input_dim]
-            hidden: [batch, hidden_dim]
-            timespan: dt (time step, default 1.0)
-        Returns:
-            new_hidden: [batch, hidden_dim]
-        """
-        # A) Candidate state
+        """Symmetric CfC dynamics with Tanh gating."""
+        # Candidate state
         h_cand = self.activation(
             self.linear_input(input_) + self.linear_hidden(hidden)
         )
         
-        # B) Time constant (controls memory vs update rate)
-        decay_logits = self.tau_input(input_) + self.tau_hidden(hidden)
-        retention = torch.sigmoid(decay_logits)  # [0, 1] - how much to retain
-        update_gate = 1.0 - retention            # [0, 1] - how much to update
+        # Symmetric gate [-1, 1]
+        gate_logits = self.gate_input(input_) + self.gate_hidden(hidden)
+        gate = torch.tanh(gate_logits)
         
-        # C) CfC fusion
-        new_hidden = h_cand * update_gate + hidden * retention
+        # Symmetric update
+        update = gate * (h_cand - hidden)
+        h_new = hidden + update
         
-        # D) LayerNorm for stability (prevents signal decay/explosion)
-        new_hidden = self.layer_norm(new_hidden)
+        # Clip to prevent explosion
+        h_new = torch.clamp(h_new, min=-1.0, max=1.0)
         
-        return new_hidden
+        return h_new
 
 
 class IARA(nn.Module):
     """
-    I.A.R.A. v4.1 - Intelligent Adaptive Regressive Architecture
+    I.A.R.A. v4.4 - Feature Attention + Symmetric CfC
     
-    Single CfC layer with LayerNorm for stable long-sequence processing.
+    Architecture:
+    1. Feature Attention Gate (learns feature importance)
+    2. Input Projection + LayerNorm
+    3. CfC recurrent loop (free dynamics)
+    4. Output LayerNorm + Dropout + Head
     """
     
     def __init__(self, config: LiquidConfig):
         super().__init__()
         self.config = config
         
-        # Input normalization
+        # Feature Attention Gate
+        self.attention = FeatureAttention(config.input_dim)
+        
+        # Input projection + normalization
+        self.input_proj = nn.Linear(config.input_dim, config.input_dim)
         self.input_norm = nn.LayerNorm(config.input_dim)
         
         # CfC backbone
         self.cfc = CfCCell(config.input_dim, config.hidden_dim)
+        
+        # Output normalization
+        self.output_norm = nn.LayerNorm(config.hidden_dim)
         
         # Dropout
         self.dropout = nn.Dropout(config.dropout)
@@ -113,11 +141,15 @@ class IARA(nn.Module):
         self._init_weights()
         
     def _init_weights(self):
+        """Xavier init + negative output bias."""
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+        
+        # Negative bias to start with DOWN preference
+        nn.init.constant_(self.head.bias, -0.5)
     
     def forward(
         self,
@@ -128,9 +160,14 @@ class IARA(nn.Module):
         Args:
             x: [batch, seq_len, input_dim]
         Returns:
-            logits: [batch] (last step prediction)
-            hidden: [batch, hidden_dim] (final hidden state)
+            logits: [batch]
+            hidden: [batch, hidden_dim]
         """
+        # Feature Attention (learn which features matter)
+        x = self.attention(x)
+        
+        # Input projection + normalization
+        x = self.input_proj(x)
         x = self.input_norm(x)
         
         batch_size, seq_len, _ = x.shape
@@ -146,6 +183,7 @@ class IARA(nn.Module):
             hidden = self.cfc(x[:, t, :], hidden)
         
         # Output
+        hidden = self.output_norm(hidden)
         out = self.dropout(hidden)
         logits = self.head(out).squeeze(-1)
         

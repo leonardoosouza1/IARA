@@ -94,9 +94,17 @@ def load_test_data(
          target_vals = df["close_log_ret"].to_numpy().astype(np.float32)
          target_cls = (target_vals > 0).astype(np.float32)
     
-    target_reg = np.zeros(len(features)) # Placeholder
     
+    # Log test data distribution
+    n_up = int(target_cls.sum())
+    n_down = len(target_cls) - n_up
+    logger.info(f"Loaded {len(features)} samples, {len(feature_cols)} features")
+    logger.info(f"Test distribution: UP={n_up}, DOWN={n_down} ({n_up/len(target_cls)*100:.1f}% UP)")
+    
+    target_reg = np.zeros(len(features))  # Placeholder
     return features, target_reg, target_cls
+
+
 
 
 @torch.no_grad()
