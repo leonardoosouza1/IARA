@@ -22,3 +22,6 @@ triton>=2.1.0
 # Visualization
 matplotlib
 seaborn
+
+# Parallel Processing
+joblib
