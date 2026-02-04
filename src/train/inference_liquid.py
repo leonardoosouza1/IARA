@@ -1,7 +1,7 @@
 """
-Inference script for I.A.R.A. Liquid Neural Network
-====================================================
-Loads trained model and evaluates on test data.
+Inference script for I.A.R.A. Liquid Neural Network (CfC Version)
+=================================================================
+Loads trained model and evaluates on test data for Trend Prediction.
 """
 
 import argparse
@@ -12,6 +12,7 @@ from typing import Optional, Tuple
 import numpy as np
 import polars as pl
 import torch
+from sklearn.metrics import roc_auc_score
 
 from src.model.iara_liquid import IARA, LiquidConfig
 from src.data.processor import Normalizer, NormalizerState
@@ -34,17 +35,33 @@ def load_model(checkpoint_path: Path, device: torch.device) -> Tuple[IARA, dict]
     """Load trained I.A.R.A. model from checkpoint."""
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    model_config = checkpoint.get("model_config")
-    if model_config is None:
-        # Fallback to default config
-        model_config = LiquidConfig()
+    # Handle different config keys (legacy vs new)
+    if "config" in checkpoint:
+        trainer_config = checkpoint["config"]
+        # Convert TrainerConfig to LiquidConfig
+        model_config = LiquidConfig(
+            input_dim=trainer_config.input_dim,
+            hidden_dim=trainer_config.hidden_dim,
+            dropout=trainer_config.dropout
+        )
+    elif "model_config" in checkpoint:
+        model_config = checkpoint["model_config"]
+    else:
+        # Fallback default
+        logger.warning("No config found in checkpoint. Using defaults.")
+        model_config = LiquidConfig(hidden_dim=256)
     
     model = IARA(model_config).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    
+    # Handle state dict key mismatch (if any)
+    state_dict = checkpoint.get("model", checkpoint.get("model_state_dict"))
+    model.load_state_dict(state_dict)
+    
     model.eval()
     
-    logger.info(f"Loaded model from {checkpoint_path}")
-    logger.info(f"Epoch: {checkpoint.get('epoch', 'N/A')}, Best Loss: {checkpoint.get('best_loss', 'N/A'):.4f}")
+    epoch = checkpoint.get('epoch', 'N/A')
+    best_auc = checkpoint.get('best_auc', 'N/A')
+    logger.info(f"Loaded model from {checkpoint_path} (Epoch {epoch}, Best AUC: {best_auc})")
     
     return model, checkpoint
 
@@ -52,28 +69,32 @@ def load_model(checkpoint_path: Path, device: torch.device) -> Tuple[IARA, dict]
 def load_test_data(
     ticker: str = "EURUSD",
     normalizer: Optional[Normalizer] = None,
-    limit: int = 500
+    limit: int = 500,
+    seq_len: int = 64
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load test data for a specific ticker."""
-    if normalizer is None:
-        normalizer = Normalizer.load(SCALER_PATH)
-    
     file_path = DATA_PROCESSED_DIR / f"{ticker}.parquet"
     if not file_path.exists():
         raise FileNotFoundError(f"Ticker {ticker} not found at {file_path}")
     
     df = pl.read_parquet(file_path)
     
-    # Get normalized feature columns
-    feature_cols = [f"{c}_norm" for c in normalizer.state.feature_columns]
-    available_cols = [c for c in feature_cols if c in df.columns]
+    # Dynamically detect all *_norm columns (same as trainer)
+    feature_cols = sorted([c for c in df.columns if c.endswith("_norm")])
+    logger.info(f"Detected {len(feature_cols)} features: {feature_cols}")
     
-    # Take last N samples for testing
-    df = df.tail(limit)
+    # Take last N samples for testing (plus buffer for seq_len)
+    df = df.tail(limit + seq_len)
     
-    features = df.select(available_cols).to_numpy().astype(np.float32)
-    target_reg = df["close_log_ret"].to_numpy().astype(np.float32)
-    target_cls = df["direction"].to_numpy().astype(np.float32)
+    features = df.select(feature_cols).to_numpy().astype(np.float32)
+    
+    # Targets for reference
+    target_cls = np.zeros(len(features))
+    if "close_log_ret" in df.columns:
+         target_vals = df["close_log_ret"].to_numpy().astype(np.float32)
+         target_cls = (target_vals > 0).astype(np.float32)
+    
+    target_reg = np.zeros(len(features)) # Placeholder
     
     return features, target_reg, target_cls
 
@@ -82,7 +103,6 @@ def load_test_data(
 def evaluate(
     model: IARA,
     features: np.ndarray,
-    target_reg: np.ndarray,
     target_cls: np.ndarray,
     device: torch.device,
     seq_len: int = 64
@@ -94,61 +114,71 @@ def evaluate(
     if n_samples <= 0:
         raise ValueError(f"Not enough samples. Need at least {seq_len + 1}")
     
-    all_pred_reg = []
-    all_pred_cls = []
-    all_true_reg = []
-    all_true_cls = []
+    predictions = []
     
     for i in range(n_samples):
         # Create sequence
+        # We start at i, go to i+seq_len
+        # x shape: [1, seq_len, features]
         x = torch.tensor(features[i:i + seq_len], dtype=torch.float32).unsqueeze(0).to(device)
         
         # Forward pass
-        pred_reg, pred_cls, _ = model(x)
+        logits, _ = model(x)
+        logits = logits.squeeze(-1)
         
-        # Get last prediction (next step)
-        # Undescale target (Trainer scaled by 1000.0)
-        pred_reg_val = pred_reg[0, -1].cpu().item() / 1000.0
+        # Probabilities
+        probs = torch.sigmoid(logits)
+        pred_prob = probs.cpu().item() # Last step prob
         
-        pred_cls_val = torch.sigmoid(pred_cls[0, -1]).cpu().item()
+        # Predictions
+        pred_cls = 1.0 if pred_prob > 0.5 else 0.0
+        confidence = abs(pred_prob - 0.5) * 2  # 0 to 1
         
-        # True values (shifted by 1)
-        true_reg_val = target_reg[i + seq_len]
-        true_cls_val = target_cls[i + seq_len]
+        # True value
+        # The target for the sequence ending at `i+seq_len` is at index `i+seq_len-1`
+        # Because in dataset we setup: x[0..64] -> predict target[63] (which is trend T+1..T+5)
+        # Wait, trainer uses: raw_target = targets[end_row - 1]
+        # end_row is start + seq_len. So target index is start + seq_len - 1.
+        # Here `start` corresponds to `i`.
+        true_idx = i + seq_len - 1
+        true_cls_val = target_cls[true_idx]
         
-        all_pred_reg.append(pred_reg_val)
-        all_pred_cls.append(pred_cls_val)
-        all_true_reg.append(true_reg_val)
-        all_true_cls.append(true_cls_val)
+        predictions.append({
+            "true_cls": true_cls_val,
+            "pred_prob": pred_prob,
+            "pred_cls": pred_cls,
+            "confidence": confidence
+        })
     
-    all_pred_reg = np.array(all_pred_reg)
-    all_pred_cls = np.array(all_pred_cls)
-    all_true_reg = np.array(all_true_reg)
-    all_true_cls = np.array(all_true_cls)
+    # Calculate Metrics
+    true_classes = [p["true_cls"] for p in predictions]
+    pred_classes = [p["pred_cls"] for p in predictions]
+    pred_probs = [p["pred_prob"] for p in predictions]
     
-    # Compute metrics
-    mse = np.mean((all_pred_reg - all_true_reg) ** 2)
-    mae = np.mean(np.abs(all_pred_reg - all_true_reg))
+    tp = sum(1 for t, p in zip(true_classes, pred_classes) if t == 1 and p == 1)
+    tn = sum(1 for t, p in zip(true_classes, pred_classes) if t == 0 and p == 0)
+    fp = sum(1 for t, p in zip(true_classes, pred_classes) if t == 0 and p == 1)
+    fn = sum(1 for t, p in zip(true_classes, pred_classes) if t == 1 and p == 0)
     
-    # Directional accuracy
-    pred_direction = (all_pred_cls > 0.5).astype(float)
-    dir_accuracy = np.mean(pred_direction == all_true_cls) * 100
+    accuracy = (tp + tn) / len(predictions) * 100 if predictions else 0
+    precision = tp / (tp + fp) * 100 if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) * 100 if (tp + fn) > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
     
-    # Sign accuracy (does prediction sign match true sign)
-    pred_sign = np.sign(all_pred_reg)
-    true_sign = np.sign(all_true_reg)
-    sign_accuracy = np.mean(pred_sign == true_sign) * 100
+    try:
+        auc = roc_auc_score(true_classes, pred_probs)
+    except:
+        auc = 0.5
     
     return {
-        "mse": mse,
-        "mae": mae,
-        "dir_accuracy": dir_accuracy,
-        "sign_accuracy": sign_accuracy,
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "auc": auc,
+        "confusion_matrix": {"TP": tp, "TN": tn, "FP": fp, "FN": fn},
         "n_samples": n_samples,
-        "pred_reg": all_pred_reg,
-        "true_reg": all_true_reg,
-        "pred_cls": all_pred_cls,
-        "true_cls": all_true_cls
+        "predictions": predictions
     }
 
 
@@ -157,18 +187,17 @@ def print_sample_predictions(results: dict, n_samples: int = 10):
     print("\n" + "=" * 60)
     print("Sample Predictions (Last 10)")
     print("=" * 60)
-    print(f"{'True LogRet':>12} | {'Pred LogRet':>12} | {'True Dir':>8} | {'Pred Dir':>8}")
+    print(f"{'True Dir':>8} | {'Pred Prob':>9} | {'Pred Dir':>8} | {'Conf':>6}")
     print("-" * 60)
     
-    for i in range(-n_samples, 0):
-        true_reg = results["true_reg"][i]
-        pred_reg = results["pred_reg"][i]
-        true_cls = "↑ UP" if results["true_cls"][i] > 0.5 else "↓ DOWN"
-        pred_cls = "↑ UP" if results["pred_cls"][i] > 0.5 else "↓ DOWN"
+    preds = results["predictions"][-n_samples:]
+    
+    for p in preds:
+        t_dir = "↑ UP" if p["true_cls"] > 0.5 else "↓ DOWN"
+        p_dir = "↑ UP" if p["pred_cls"] > 0.5 else "↓ DOWN"
+        match = "✓" if (p["true_cls"] > 0.5) == (p["pred_cls"] > 0.5) else "✗"
         
-        match = "✓" if (results["true_cls"][i] > 0.5) == (results["pred_cls"][i] > 0.5) else "✗"
-        
-        print(f"{true_reg:>12.6f} | {pred_reg:>12.6f} | {true_cls:>8} | {pred_cls:>8} {match}")
+        print(f"{t_dir:>8} | {p['pred_prob']:>9.4f} | {p_dir:>8} {match} | {p['confidence']:>6.2%}")
 
 
 def main():
@@ -193,22 +222,26 @@ def main():
     # Load test data
     logger.info(f"Loading test data for {args.ticker}...")
     normalizer = Normalizer.load(SCALER_PATH)
-    features, target_reg, target_cls = load_test_data(args.ticker, normalizer, args.limit)
+    features, target_reg, target_cls = load_test_data(args.ticker, normalizer, args.limit, args.seq_len)
     logger.info(f"Loaded {len(features)} samples, {features.shape[1]} features")
     
     # Evaluate
     logger.info("Evaluating...")
-    results = evaluate(model, features, target_reg, target_cls, device, args.seq_len)
+    results = evaluate(model, features, target_cls, device, args.seq_len)
     
     # Print results
     print("\n" + "=" * 60)
     print(f"I.A.R.A. Evaluation Results - {args.ticker}")
     print("=" * 60)
     print(f"Samples Evaluated: {results['n_samples']}")
-    print(f"MSE (Log-Return):  {results['mse']:.6f}")
-    print(f"MAE (Log-Return):  {results['mae']:.6f}")
-    print(f"Direction Accuracy: {results['dir_accuracy']:.2f}%")
-    print(f"Sign Accuracy:      {results['sign_accuracy']:.2f}%")
+    print(f"Accuracy:  {results['accuracy']:.2f}%")
+    print(f"AUC:       {results['auc']:.4f}")
+    print(f"Precision: {results['precision']:.2f}%")
+    print(f"Recall:    {results['recall']:.2f}%")
+    print(f"F1 Score:  {results['f1']:.4f}")
+    print("-" * 60)
+    cm = results["confusion_matrix"]
+    print(f"Confusion Matrix: [TP={cm['TP']}, TN={cm['TN']}, FP={cm['FP']}, FN={cm['FN']}]")
     
     print_sample_predictions(results)
     
@@ -216,9 +249,9 @@ def main():
     print("\n" + "=" * 60)
     print("Trading Interpretation")
     print("=" * 60)
-    if results["dir_accuracy"] > 55:
-        print("✅ Model shows predictive edge! (Dir Acc > 55%)")
-    elif results["dir_accuracy"] > 50:
+    if results["accuracy"] > 55:
+        print("✅ Model shows predictive edge! (Acc > 55%)")
+    elif results["accuracy"] > 52:
         print("⚠️  Marginal edge. May need more training or tuning.")
     else:
         print("❌ No evident edge. Consider more epochs or architecture changes.")
