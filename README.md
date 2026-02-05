@@ -127,6 +127,3 @@ saci-trader/
 For a deep dive into the Model Architecture, Feature Logic, and Training Strategy, please read the [Architecture Documentation](docs/ARCHITECTURE.md).
 
 ---
-
-## 📝 License
-MIT License.
