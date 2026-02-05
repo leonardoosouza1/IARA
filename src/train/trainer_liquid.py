@@ -437,8 +437,9 @@ class Trainer:
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode='min',
-            factor=0.5,
-            patience=5
+            factor=0.8,    # v6.12 Gentle decay (was 0.5)
+            patience=15,   # v6.12 Patience (was 5)
+            min_lr=1e-6    # v6.12 Floor (was implicit 0)
         )
         
         # v6.10 Debug: Using standard BCE for baseline test
