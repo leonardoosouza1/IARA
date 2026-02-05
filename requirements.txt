@@ -30,3 +30,9 @@ yfinance
 # Interactive Dashboard
 streamlit
 plotly
+
+# MLOps Stack (V7)
+psycopg2-binary
+sqlalchemy
+mlflow
+boto3

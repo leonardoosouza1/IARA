@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  # 1. Cérebro de Dados (TimescaleDB + pgvector)
+  db:
+    image: timescale/timescaledb:latest-pg14
+    container_name: saci-brain-db
+    environment:
+      - POSTGRES_USER=saci
+      - POSTGRES_PASSWORD=saci_secret
+      - POSTGRES_DB=saci_core
+    ports:
+      - "5432:5432"
+    volumes:
+      - saci_db_data:/var/lib/postgresql/data
+    networks:
+      - saci-net
+    restart: unless-stopped
+
+  # 2. Laboratório de Experimentos (MLflow)
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: saci-lab-mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=postgresql://saci:saci_secret@db:5432/mlflow
+      - MLFLOW_ARTIFACT_ROOT=s3://mlflow/
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=minio123
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://saci:saci_secret@db:5432/mlflow
+      --default-artifact-root s3://mlflow/
+      --host 0.0.0.0
+    depends_on:
+      - db
+      - minio
+    networks:
+      - saci-net
+
+  # 3. Armazém de Arquivos (MinIO S3)
+  minio:
+    image: minio/minio
+    container_name: saci-vault-minio
+    ports:
+      - "9000:9000"
+      - "9002:9001"
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=minio123
+    command: server /data --console-address ":9001"
+    volumes:
+      - saci_minio_data:/data
+    networks:
+      - saci-net
+
+  # 4. Interface de Banco (Adminer)
+  adminer:
+    image: adminer
+    container_name: saci-adminer
+    ports:
+      - "8080:8080"
+    networks:
+      - saci-net
+
+  # 5. O Cérebro (Trainer/Inference)
+  saci-brain:
+    image: saci-trader-saci-brain:latest
+    container_name: saci-brain
+    volumes:
+      - .:/app
+    environment:
+      - DB_URI=postgresql://saci:saci_secret@db:5432/saci_core
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - HSA_OVERRIDE_GFX_VERSION=10.3.0
+      - PYTHONPATH=/app
+    depends_on:
+      - db
+      - mlflow
+    networks:
+      - saci-net
+    command: >
+      /bin/bash -c "pip install mlflow psycopg2-binary boto3 sqlalchemy && tail -f /dev/null"
+    
+    # GPU & Security (ROCm Config)
+    shm_size: '8gb'
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_PTRACE
+
+volumes:
+  saci_db_data:
+  saci_minio_data:
+
+networks:
+  saci-net:
+    driver: bridge

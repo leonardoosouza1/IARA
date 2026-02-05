@@ -5,7 +5,7 @@ checkpoints_lab/
 logs/
 plots/
 *.pt
-*.pth
+# *.pth
 *.parquet
 *.csv
 

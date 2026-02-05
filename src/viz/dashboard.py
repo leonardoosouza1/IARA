@@ -15,6 +15,9 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.train.trainer_liquid import TrainerConfig, MultiAssetDataset
 from src.model.iara_liquid import IARA
+from src.data.feature_factory import process_hierarchical  # v6.12 Integration
+import torch.nn.functional as F
+from src.trading.simulation import MarketSimulator  # Trade Hub Engine
 
 # Configuração da Página
 st.set_page_config(layout="wide", page_title="SACI Neural Dashboard", page_icon="🧠")
@@ -74,15 +77,28 @@ def load_model(device='cpu', use_lab=False):
 
 @st.cache_resource
 def get_dataset(_config, ticker="EURUSD"):
-    # Cache do dataset para não recarregar sempre
-    # Use legacy mode to access specific tickers
-    return MultiAssetDataset(
-        seq_len=_config.seq_len,
-        stride=1,
-        tickers=[ticker],
-        augment=False,
-        target_lookahead=5
-    )
+    # v6.12: Use Feature Factory to generate 18-feature vectors (Fixes Padding Issue)
+    # Search for raw file
+    # Check for both {ticker}.parquet and {ticker}_M1.parquet to be safe
+    candidates = [
+        Path(f"data/raw/{ticker}.parquet"),
+        Path(f"data/raw/{ticker}_M1.parquet"),
+        Path(f"data/processed/{ticker}.parquet"),
+        Path(f"data/processed/{ticker}_M1.parquet")
+    ]
+    
+    raw_path = None
+    for p in candidates:
+        if p.exists():
+            raw_path = p
+            break
+         
+    if raw_path and raw_path.exists():
+        X, y = process_hierarchical(raw_path, _config.seq_len, 2) # Stride 2 to match training
+        if X is not None:
+            return torch.from_numpy(X), torch.from_numpy(y)
+    
+    return None, None
 
 def get_latest_log_file():
     log_files = glob.glob("logs/training_history_*.jsonl")
@@ -147,7 +163,7 @@ is_lab = model_source == "Lab (Experimental)"
 model, config = load_model(device, use_lab=is_lab)
 
 # --- TABS ---
-tab_live, tab_neu, tab_mkt = st.tabs(["🔥 Live Training", "🧠 Neural Neuroscience", "📉 Market Context"])
+tab_live, tab_neu, tab_hub, tab_mkt = st.tabs(["🔥 Live Training", "🧠 Neural Neuroscience", "🏟️ Trade Hub (Sim)", "📉 Market Context"])
 
 # --- TAB 1: Live Training ---
 with tab_live:
@@ -192,23 +208,24 @@ with tab_neu:
         ticker = st.sidebar.selectbox("Asset", ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF"])
         
         # Dataset Loading
-        ds = get_dataset(config, ticker)
-        if len(ds) > 0:
-            sample_idx = st.sidebar.slider("Sample Index (Time)", 0, len(ds)-1, len(ds)-1)
+        # Dataset Loading (v6.12 Direct Tensor)
+        X_data, y_data = get_dataset(config, ticker)
+        
+        if X_data is not None and len(X_data) > 0:
+            sample_idx = st.sidebar.slider("Sample Index (Time)", 0, len(X_data)-1, len(X_data)-1)
             
             # Inference Data
-            x, y, w = ds[sample_idx]
+            x = X_data[sample_idx]
+            y = y_data[sample_idx]
+            
             x_in = x.unsqueeze(0).to(device) # [1, seq, feat]
             
-            # Feature Padding (Hack for 16->18 mismatch)
-            current_dim = x_in.shape[-1]
+            # v6.12: No more padding needed (Feature Factory handles it)
+            # Verify dimensions
             target_dim = config.input_dim
-            
-            if current_dim < target_dim:
-                st.toast(f"Padding input {current_dim} -> {target_dim} (Adding Context/Trend Zeros)", icon="🔧")
-                padding = torch.zeros(1, x_in.shape[1], target_dim - current_dim, device=device)
-                x_in_padded = torch.cat([x_in, padding], dim=-1)
-                x_in = x_in_padded
+            if x_in.shape[-1] != target_dim:
+                st.error(f"Dimension Mismatch: Model expects {target_dim}, got {x_in.shape[-1]}. Re-run Feature Factory?")
+
             
             # Hooks
             hooks = HookManager()
@@ -293,10 +310,140 @@ with tab_neu:
                  )
                  st.plotly_chart(fig_attn, use_container_width=True)
 
+            # 4. Neuroscope: Macro vs Micro (Hidden Context)
+            st.subheader("🔬 Neuroscope: Macro vs Micro (O que a Rede Vê)")
+            
+            # Extract Trend Features (Indices 12=M5, 13=H1 based on feature_factory)
+            # x is [seq, feat]
+            trend_m5 = x[:, 12].cpu().numpy() # [256]
+            trend_h1 = x[:, 13].cpu().numpy() # [256]
+            
+            # Create a dataframe for Plotly
+            df_ctx = pd.DataFrame({
+                "Time": range(len(trend_m5)),
+                "Trend M5 (Tactical)": trend_m5,
+                "Trend H1 (Strategic)": trend_h1 + 2.5 # Offset for visibility
+            })
+            
+            fig_ctx = go.Figure()
+            
+            # Plot M5
+            fig_ctx.add_trace(go.Scatter(
+                x=df_ctx["Time"], y=df_ctx["Trend M5 (Tactical)"],
+                mode='lines+markers', name='M5 Trend (Tactical)',
+                line=dict(shape='hv', width=2),
+                marker=dict(size=4)
+            ))
+            
+            # Plot H1
+            fig_ctx.add_trace(go.Scatter(
+                x=df_ctx["Time"], y=df_ctx["Trend H1 (Strategic)"],
+                mode='lines+markers', name='H1 Trend (Strategic)',
+                line=dict(shape='hv', width=3),
+                marker=dict(size=6)
+            ))
+            
+            fig_ctx.update_layout(
+                title="Sincronia Fractal: Alinhamento de Tendências no Input",
+                yaxis=dict(
+                    tickvals=[-1, 0, 1, 1.5, 2.5, 3.5],
+                    ticktext=["DOWN", "FLAT", "UP", "", "DOWN (H1)", "UP (H1)"]
+                ),
+                height=300
+            )
+            st.plotly_chart(fig_ctx, use_container_width=True)
+            
+            # 5. Logic Stream (Explainability)
+            with st.expander("🤖 Log de Pensamento (Decodificado)"):
+                last_m5 = trend_m5[-1]
+                last_h1 = trend_h1[-1]
+                
+                logic_msg = []
+                if last_h1 == 1:
+                    logic_msg.append("✅ **Macro (H1)**: Tendência de ALTA forte.")
+                elif last_h1 == -1:
+                    logic_msg.append("🔻 **Macro (H1)**: Tendência de BAIXA forte.")
+                else:
+                    logic_msg.append("⚠️ **Macro (H1)**: Lateral/Indefinido.")
+                    
+                if last_m5 == last_h1 and last_h1 != 0:
+                    logic_msg.append("🚀 **Sinergia**: M5 alinhou com H1. Sinal amplificado.")
+                elif last_m5 != last_h1:
+                    logic_msg.append("🛑 **Conflito**: M5 diverge do H1 (Correção ou Ruído). Aguardando alinhamento.")
+                    
+                confidence = abs(prob - 0.5) * 2
+                logic_msg.append(f"🧠 **Confiança Neural**: {confidence:.1%} ({'Alta' if confidence > 0.6 else 'Baixa'})")
+                
+                for msg in logic_msg:
+                    st.write(msg)
+
         else:
             st.warning("Dataset vazio para este ticker.")
     else:
         st.error("Carregamento do modelo falhou.")
+
+
+# --- TAB 3: Trade Hub (Simulation) ---
+with tab_hub:
+    st.header("🏟️ Trade Hub: Neural Simulation Engine")
+    
+    if model:
+        # Session State for Simulator
+        if 'simulator' not in st.session_state:
+            st.session_state['simulator'] = MarketSimulator(model, ticker="EURUSD", device=device)
+            st.session_state['sim_running'] = False
+            
+        sim = st.session_state['simulator']
+        
+        # Controls
+        c_play, c_step, c_reset, c_speed = st.columns([1, 1, 1, 2])
+        
+        if c_step.button("👣 Step"):
+            sim.step()
+            
+        if c_reset.button("🔄 Reset"):
+            sim.reset()
+            st.session_state['sim_running'] = False
+            
+        # Sim Loop (basic manual for now, autoplay requires rerun loop)
+        # Display Current State
+        if sim.history:
+            state = sim.history[-1]
+            
+            # Metrics Row
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Step (Candle)", sim.current_step)
+            m2.metric("Balance", f"${sim.balance:.2f}", delta=f"{sim.balance - sim.initial_balance:.2f}")
+            m3.metric("Neural Prob", f"{state.prob:.1%}")
+            
+            status = "WAIT"
+            if len(state.logic_log) > 0:
+                 if "BUY" in str(state.logic_log): status = "BUY"
+                 if "SELL" in str(state.logic_log): status = "SELL"
+            m4.metric("Action", status)
+            
+            # Logic Log
+            st.subheader("🧠 Brain Log (Pensamento)")
+            for line in state.logic_log:
+                if "Signal" in line:
+                    st.success(line)
+                elif "Macro" in line:
+                    st.info(line)
+                elif "Result" in line:
+                    st.caption(line)
+                else:
+                    st.write(line)
+                    
+            # Chart (PnL Curve)
+            pnl_history = [s.price for s in sim.history]
+            fig_pnl = px.line(y=pnl_history, title="Equity Curve (Simulated)")
+            st.plotly_chart(fig_pnl, use_container_width=True)
+            
+        else:
+            st.info("Simulation Ready. Press Step to start.")
+            
+    else:
+        st.error("Model not loaded.")
 
 # --- TAB 3: Market ---
 with tab_mkt:

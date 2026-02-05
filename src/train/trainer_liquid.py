@@ -32,7 +32,9 @@ torch.backends.cudnn.benchmark = True
 from sklearn.metrics import roc_auc_score
 
 from src.model.iara_liquid import IARA, LiquidConfig
-from src.utils.logger import TelemetryLogger
+import torch.multiprocessing as mp
+import mlflow # SACI V7 Stack
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -40,6 +42,15 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# SACI V7: MLflow Setup
+MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+try:
+    mlflow.set_tracking_uri(MLFLOW_URI)
+    mlflow.set_experiment("SACI_Liquid_Brain_v6")
+    logger.info(f"MLflow connected at {MLFLOW_URI}")
+except Exception as e:
+    logger.warning(f"MLflow connection failed: {e}")
 
 # Paths
 DATA_PROCESSED_DIR = Path(__file__).parent.parent.parent / "data" / "processed"
@@ -312,8 +323,11 @@ class Trainer:
         val_dataset: Optional[torch.utils.data.Dataset] = None
     ):
         self.config = config
-        self.device = device
+        self.device = config.device
+        self.use_mlflow = True
         
+        # Directories
+        Path("checkpoints").mkdir(exist_ok=True)
         # v6.9 Hybrid Engine: Use injected datasets if provided
         if train_dataset is not None and val_dataset is not None:
             logger.info("Using pre-computed datasets (v6.9 Hybrid Engine)")
@@ -399,8 +413,6 @@ class Trainer:
             )
             
             n_samples = len(train_idxs)
-        
-        self.telemetry = TelemetryLogger()
         
         # MEMORY: Initialize Selective History (v6.3)
         self.memory_alpha = 0.7 
@@ -494,6 +506,11 @@ class Trainer:
             self.optimizer.load_state_dict(checkpoint['optimizer'])
         if 'scheduler' in checkpoint:
             self.scheduler.load_state_dict(checkpoint['scheduler'])
+            # v6.12 HOTFIX: Enforce new config over old state
+            self.scheduler.patience = 15
+            self.scheduler.factor = 0.8
+            self.scheduler.min_lrs = [1e-6] * len(self.scheduler.optimizer.param_groups)
+            logger.info(f"🔧 Scheduler Config Enforced: Patience={self.scheduler.patience}, Factor={self.scheduler.factor}, MinLR={self.scheduler.min_lrs[0]}")
             
         # Load State
         self.start_epoch = checkpoint['epoch'] + 1
@@ -756,6 +773,16 @@ class Trainer:
         current_lr = self.config.learning_rate
         best_model_state = None
         
+        # V7: Log Params once
+        if self.use_mlflow:
+            try:
+                mlflow.end_run() # Close any previous run if it exists
+                mlflow.start_run(run_name=f"Liquid_v6_{int(time.time())}")
+                mlflow.log_params(asdict(self.config)) # Use asdict for dataclass
+                logger.info(f"MLflow run started: {mlflow.active_run().info.run_id}")
+            except Exception as e:
+                logger.warning(f"MLflow run start or param logging failed: {e}")
+
         try:
             for epoch in range(self.start_epoch, self.config.epochs):
                 self.epoch = epoch
@@ -774,24 +801,25 @@ class Trainer:
                 if torch.cuda.is_available():
                     vram_usage = torch.cuda.memory_allocated() / torch.cuda.get_device_properties(0).total_memory * 100
                 
-                self.telemetry.log({
-                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "epoch": epoch,
-                    "train": train_m,
-                    "val": val_m,
-                    "metrics": {
-                        "learning_rate": new_lr,
-                        "best_auc": self.best_val_auc
-                    },
-                    "memory": {
-                        "chronic": chronic_count,
-                        "mastered": mastered_count,
-                        "noise_discarded": noise_count
-                    },
-                    "hardware": {
-                        "vram_percent": round(vram_usage, 2)
-                    }
-                })
+                # V7: Log to MLflow
+                if self.use_mlflow:
+                    try:
+                        metrics_flat = {
+                            "train_loss": train_m['loss'],
+                            "train_accuracy": train_m['accuracy'],
+                            "train_auc": train_m['auc'],
+                            "val_loss": val_m['loss'],
+                            "val_accuracy": val_m['accuracy'],
+                            "val_auc": val_m['auc'],
+                            "learning_rate": new_lr,
+                            "chronic_memory": chronic_count,
+                            "mastered_memory": mastered_count,
+                            "noise_discarded": noise_count,
+                            "vram_percent": round(vram_usage, 2)
+                        }
+                        mlflow.log_metrics(metrics_flat, step=epoch)
+                    except Exception as e:
+                        logger.warning(f"MLflow log failed for epoch {epoch}: {e}")
                 
                 logger.info(
                     f"Epoch {epoch}: "
