@@ -13,6 +13,7 @@ services:
       - ./data:/app/data
       - ./config:/app/config
       - ./logs:/app/logs
+      - ./plots:/app/plots
       - ./checkpoints:/app/checkpoints
       - ./reports:/app/reports
     

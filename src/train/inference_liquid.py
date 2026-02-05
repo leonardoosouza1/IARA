@@ -149,8 +149,16 @@ def evaluate(
         probs = torch.sigmoid(logits)
         pred_prob = probs.cpu().item() 
         
-        # Get Dynamic Decision
-        decision = active_brain.get_decision(pred_prob)
+        # v6.11: Extract Regime Features (ADX/ATR)
+        # Assuming sorted features: adx_norm is index 0, atr_norm is index 1
+        current_step = features[i + seq_len - 1]
+        market_state = {
+            'adx_norm': current_step[0].item(),
+            'atr_norm': current_step[1].item()
+        }
+        
+        # Get Dynamic Decision with Regime Check
+        decision = active_brain.get_decision(pred_prob, market_features=market_state)
         
         # True value
         true_idx = i + seq_len - 1

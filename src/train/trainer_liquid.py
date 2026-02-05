@@ -85,6 +85,9 @@ class TrainerConfig:
     # Early Stopping
     patience: int = 150  # v6.8: Increased for Blindfold adaptation period
     
+    # Prediction Target
+    target_lookahead: int = 5  # v6.11: Cumulative 5-bar target
+    
     # Checkpointing
     checkpoint_dir: Path = CHECKPOINT_DIR
     
@@ -142,7 +145,8 @@ class MultiAssetDataset(Dataset):
         augment: bool = False,
         noise_std: float = 0.02,
         scale_range: Tuple[float, float] = (0.98, 1.02),
-        label_smooth: float = 0.0
+        label_smooth: float = 0.0,
+        target_lookahead: int = 5  # v6.11: Configurable horizon
     ):
         self.data_dir = Path(data_dir)
         self.seq_len = seq_len
@@ -152,6 +156,7 @@ class MultiAssetDataset(Dataset):
         self.noise_std = noise_std
         self.scale_range = scale_range
         self.label_smooth = label_smooth
+        self.target_lookahead = target_lookahead
         self.feature_cols = None
         self.samples = self._load_data(tickers)
         self.indices = self._compute_indices()
@@ -230,13 +235,22 @@ class MultiAssetDataset(Dataset):
             scale = random.uniform(self.scale_range[0], self.scale_range[1])
             x = x * scale
         
-        raw_target = targets[end_row - 1]
-        binary_target = 1.0 if raw_target > 0 else 0.0
+        # v6.11: Configurable CUMULATIVE forward return (reduces noise)
+        end_idx = min(end_row + self.target_lookahead, len(targets))
+        cumulative_return = targets[end_row:end_idx].sum() if end_idx > end_row else targets[end_row - 1]
         
-        # v6.7 Profit Weighting
-        # Boost weight for high-magnitude moves (Volatility Aware)
-        # 1.0 nominal + up to 0.5 extra for big moves
-        abs_ret = abs(raw_target)
+        # Only classify as UP/DOWN if movement exceeds noise threshold
+        noise_threshold = 0.0001  # 1 pip for forex
+        if cumulative_return > noise_threshold:
+            binary_target = 1.0
+        elif cumulative_return < -noise_threshold:
+            binary_target = 0.0
+        else:
+            # Small moves get label 0.5 (uncertain) - will be smoothed anyway
+            binary_target = 0.5
+        
+        # v6.10 Profit Weighting: Based on cumulative return
+        abs_ret = abs(cumulative_return)
         # Assume 1% move (0.01) is "Big". 
         profit_weight = 1.0 + min(50.0 * abs_ret, 1.5) # Caps at 2.5x total weight for massive moves
         
@@ -330,7 +344,12 @@ class Trainer:
             
         else:
             # Legacy mode: Create datasets on-the-fly
-            full_dataset = MultiAssetDataset(seq_len=config.seq_len, stride=config.stride, augment=False)
+            full_dataset = MultiAssetDataset(
+                seq_len=config.seq_len, 
+                stride=config.stride, 
+                augment=False,
+                target_lookahead=config.target_lookahead
+            )
             
             if full_dataset.input_dim > 0:
                 config.input_dim = full_dataset.input_dim
@@ -345,10 +364,17 @@ class Trainer:
                 augment=True,
                 noise_std=config.noise_std,
                 scale_range=(config.scale_min, config.scale_max),
-                label_smooth=config.label_smooth
+                label_smooth=config.label_smooth,
+                target_lookahead=config.target_lookahead
             )
             # Validation
-            val_dataset_internal = MultiAssetDataset(seq_len=config.seq_len, stride=config.stride, augment=False, label_smooth=0.0)
+            val_dataset_internal = MultiAssetDataset(
+                seq_len=config.seq_len, 
+                stride=config.stride, 
+                augment=False, 
+                label_smooth=0.0,
+                target_lookahead=config.target_lookahead
+            )
             
             train_subset = Subset(train_dataset_internal, train_idxs)
             val_subset = Subset(val_dataset_internal, val_idxs)
@@ -415,10 +441,9 @@ class Trainer:
             patience=5
         )
         
-        # v6.7 Profit Weighted Focal Loss (Balanced)
-        # alpha=0.55 (Slight Positive Bias, down from 0.75 Permabull)
-        # gamma=1.5 (Standard Focal, down from 2.0)
-        self.criterion = AsymmetricFocalLoss(alpha=0.55, gamma=1.5, reduction='none')
+        # v6.10 Debug: Using standard BCE for baseline test
+        self.criterion = nn.BCEWithLogitsLoss(reduction='none')
+        self.use_simple_bce = True  # Flag for train_epoch to skip profit weighting
         # Legacy for valid reporting (BCE is standard metric)
         self.valid_criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], device=device))
         
@@ -521,8 +546,13 @@ class Trainer:
                     logits, _ = self.model(x)
                     
                     if training:
-                        # v6.7 Profit-Weighted Focal Loss
-                        loss_per_sample = self.criterion(logits.squeeze(), y, weights=w)
+                        # v6.10: Handle both BCE and custom loss functions
+                        if hasattr(self, 'use_simple_bce') and self.use_simple_bce:
+                            loss_per_sample = self.criterion(logits.squeeze(), y)
+                            if w is not None:
+                                loss_per_sample = loss_per_sample * w.to(self.device)
+                        else:
+                            loss_per_sample = self.criterion(logits.squeeze(), y, weights=w)
                         loss = loss_per_sample.mean()
                     else:
                         loss = self.valid_criterion(logits.squeeze(), y)
@@ -858,12 +888,14 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=768)
-    parser.add_argument("--patience", type=int, default=40)
+    parser.add_argument("--patience", type=int, default=100)
     parser.add_argument("--seq-len", type=int, default=256)
     parser.add_argument("--lr", type=float, default=0.001, help="Learning Rate")
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     parser.add_argument("--use-cache", action="store_true", 
                         help="Use pre-computed tensors from data/cache/ (v6.9 Hybrid Engine)")
+    parser.add_argument("--lab", action="store_true", 
+                        help="Run in LAB MODE: Limit dataset to 50k samples, use separate cache/checkpoints.")
     return parser.parse_args()
 
 
@@ -872,16 +904,25 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # v6.9 Hybrid Engine: Check for pre-computed cache
-    if args.use_cache:
+    if args.use_cache or args.lab: # Lab implies cache usage
         from src.data import load_precomputed_datasets, HybridDatasetLoader
         from pathlib import Path
         
-        cache_dir = Path("data/cache")
+        if args.lab:
+            logger.info("🧪 LAB MODE ACTIVATED: Using limited dataset & separate cache.")
+            cache_dir = Path("data/cache_lab")
+            ckt_dir = Path("checkpoints_lab")
+            limit = 50000
+        else:
+            cache_dir = Path("data/cache")
+            ckt_dir = CHECKPOINT_DIR
+            limit = 0
+            
         loader = HybridDatasetLoader(cache_dir)
         
         if not loader.is_cache_valid():
-            logger.info("Cache not found. Running Feature Factory...")
-            loader.build_cache(seq_len=args.seq_len)
+            logger.info(f"Cache not found in {cache_dir}. Running Feature Factory...")
+            loader.build_cache(seq_len=args.seq_len, limit=limit)
         
         train_ds, val_ds = loader.get_datasets()
         
@@ -893,7 +934,8 @@ if __name__ == "__main__":
             seq_len=train_ds.get_seq_len(),
             input_dim=train_ds.get_feature_dim(),
             learning_rate=args.lr,
-            resume=args.resume
+            resume=args.resume,
+            checkpoint_dir=ckt_dir
         )
         
         logger.info(f"Using pre-computed cache: {train_ds.get_feature_dim()} features, {len(train_ds)} train samples")

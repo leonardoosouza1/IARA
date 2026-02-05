@@ -1,10 +1,34 @@
 from dataclasses import dataclass, field
-from typing import List, Deque, Dict
+from typing import List, Deque, Dict, Tuple
 import numpy as np
 from collections import deque
 import logging
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class RegimeFilter:
+    """
+    Filters out market conditions that are unsuitable for the model.
+    Uses normalized values (Z-score assumed).
+    """
+    adx_threshold: float = -0.5  # Approx ADX < 20
+    atr_threshold: float = -0.5  # Low volatility validation
+    
+    def check(self, features: Dict[str, float]) -> Tuple[bool, str]:
+        """Returns (is_tradable, reason)"""
+        adx = features.get('adx_norm', 1.0)
+        atr = features.get('atr_norm', 1.0)
+        
+        # Check Trend Strength
+        if adx < self.adx_threshold:
+            return False, f"CHOP (ADX {adx:.2f} < {self.adx_threshold})"
+            
+        # Check Volatility
+        if atr < self.atr_threshold:
+            return False, f"COMPRESSION (ATR {atr:.2f} < {self.atr_threshold})"
+            
+        return True, "OK"
 
 @dataclass
 class ActiveInferenceModule:
@@ -19,6 +43,9 @@ class ActiveInferenceModule:
     prediction_history: Deque[Dict] = field(default_factory=lambda: deque(maxlen=100))
     current_threshold: float = 0.60
     confidence_history: Deque[float] = field(default_factory=lambda: deque(maxlen=5)) # Stability check
+    
+    # Components
+    regime_filter: RegimeFilter = field(default_factory=RegimeFilter)
     
     def log_prediction(self, prob: float, actual: float):
         """Register a prediction outcome to update internal stats."""
@@ -51,29 +78,35 @@ class ActiveInferenceModule:
         acc = correct / len(history)
         
         # Dynamic Logic
-        if acc < 0.52:
-            self.current_threshold = 0.75 # DEFENSIVE
+        if acc < 0.51:
+            self.current_threshold = 0.60 # DEFENSIVE (Lowered from 0.75)
             mode = "DEFENSIVE 🛡️"
-        elif acc > 0.58:
-            self.current_threshold = 0.55 # AGGRESSIVE ⚔️
-            mode = "AGGRESSIVE ⚔️"
+        elif acc <= 0.55:
+            self.current_threshold = 0.55 # MODERATE
+            mode = "MODERATE ⚖️"
         else:
-            self.current_threshold = 0.60 # NEUTRAL 😐
-            mode = "NEUTRAL 😐"
+            self.current_threshold = 0.53 # AGGRESSIVE (Lowered from 0.55)
+            mode = "AGGRESSIVE ⚔️"
             
         logger.info(f"Active Calibration: Acc {acc:.1%} -> Threshold {self.current_threshold} ({mode})")
         
-    def get_decision(self, prob: float) -> str:
+    def get_decision(self, prob: float, market_features: Dict[str, float] = None) -> str:
         """
         Returns 'BUY', 'SELL', or 'WAIT' based on Dynamic Threshold and Stability.
         """
-        # Stability Check (Volatility of confidence)
+        # 1. Regime Check (Optional)
+        if market_features:
+            is_good, reason = self.regime_filter.check(market_features)
+            if not is_good:
+                return f"WAIT ({reason})"
+
+        # 2. Stability Check (Volatility of confidence)
         if len(self.confidence_history) >= 5:
             volatility = np.std(list(self.confidence_history))
             if volatility > 0.2:
                 return "WAIT (Volatile)"
         
-        # Threshold Check
+        # 3. Threshold Check
         if prob > self.current_threshold:
             return "BUY"
         elif prob < (1 - self.current_threshold):

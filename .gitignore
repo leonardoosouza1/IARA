@@ -1,2 +1,38 @@
+# --- Project Specific ---
 data/
 checkpoints/
+checkpoints_lab/
+logs/
+plots/
+*.pt
+*.pth
+*.parquet
+*.csv
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Environments ---
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# --- IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Jupyter ---
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# --- OS Generated ---
+.DS_Store
+Thumbs.db

@@ -26,3 +26,7 @@ seaborn
 # Parallel Processing
 joblib
 yfinance
+
+# Interactive Dashboard
+streamlit
+plotly
