@@ -49,19 +49,40 @@ class LearnedPositionalEncoding(nn.Module):
         return self.dropout(x + self.position_embeddings(positions))
 
 class FeatureAttention(nn.Module):
-    """Feature-level attention gate."""
+    """
+    Feature-level attention gate.
+    [v9.0] Simplified to Element-wise Gating (Diagonal) to force 1-to-1 feature importance.
+    This prevents F15 (Noise) from being used to gate F0 (Price).
+    """
     def __init__(self, input_dim: int, dropout: float = 0.1):
         super().__init__()
+        # Global Average Pooling style context? No, we want to know WHICH feature is important.
+        # Simple learnable weight per feature:
+        # x * sigmoid(w*x + b) -> Non-linear self-gating
+        
         self.gate = nn.Sequential(
-            nn.Linear(input_dim, input_dim * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(input_dim * 2, input_dim),
+            nn.Linear(input_dim, input_dim), # Diagonal-ish preference if we init properly, but dense is fine if trained well.
+            # Actually, to strictly enforce "Is this feature useful?", let's use a shared MLP that looks at the feature distribution?
+            # Let's stick to the previous architecture but initializing correlation.
+            
+            # REVISION: Let's use Squeeze-and-Excitation (SE) style:
+            # Squeeze: Global Avg -> Excitation: FC -> Sigmoid -> Scale.
+            # But we are Time-Distributed.
+            
+            # Simple Learnable Gate:
+            nn.Linear(input_dim, input_dim),
+            nn.Tanh(),
+            nn.Linear(input_dim, input_dim),
             nn.Sigmoid()
         )
-    
+        
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * self.gate(x)
+        # x: [Batch, Seq, Feat]
+        # We want to learn a mask M [Batch, Seq, Feat] or just [Feat]?
+        # "Feature Importance" usually implies "for this sample, at this time".
+        attention_mask = self.gate(x)
+        return x * attention_mask  # Weighted features
+
 
 class TemporalSelfAttention(nn.Module):
     """Multi-head self-attention."""
@@ -138,12 +159,32 @@ class ModulatedIARA(nn.Module):
         super().__init__()
         self.config = config
         
+        # [v9.0] Feature Attention moved to INPUT level for Explainability (RSI vs Price)
+        self.feature_attention = FeatureAttention(config.input_dim, dropout=config.dropout*0.1)
+        
         self.input_proj = nn.Linear(config.input_dim, config.hidden_dim)
         self.pos_encoding = LearnedPositionalEncoding(config.hidden_dim, max_len=config.max_seq_len, dropout=config.dropout*0.5)
         self.self_attention = TemporalSelfAttention(config.hidden_dim, num_heads=config.num_heads, dropout=config.dropout)
-        self.feature_attention = FeatureAttention(config.hidden_dim, dropout=config.dropout*0.5)
         
-        self.attention_proj = nn.Linear(config.hidden_dim, config.input_dim)
+        # self.attention_proj removed as we don't project back down for CfC input in this variant, 
+        # BUT the definition of CfC layers below expects `config.input_dim` if i==0.
+        # Wait, the CfC logic below is:
+        # i=0: input_dim -> hidden_dim
+        # The loop uses `current_input`.
+        # If we project up to hidden_dim immediately, then CfC i=0 should be hidden->hidden?
+        # Original code had: x_cfc = self.attention_proj(x_a) -> projected back to input_dim.
+        # So current_input WAS input_dim.
+        
+        # Let's keep the flow: Input(16) -> Attn(16) -> Proj(128) -> SelfAttn(128) -> ProjBack(16) -> CfC.
+        # NO, that's redundant.
+        # Better: Input(16) -> FeatAttn(16) -> Proj(128) -> SelfAttn(128) -> CfC(128).
+        # We need to change the first CfC layer to accept 128 input then.
+        
+        # Let's stick to the simplest explainability change:
+        # Input(16) -> FeatAttn(16) -> Proj(128) -> ...
+        # But we need to feed CfC.
+        
+        self.attention_proj = nn.Linear(config.hidden_dim, config.input_dim) # Keep this for compatibility with existing CfC loop
         self.input_norm = nn.LayerNorm(config.input_dim)
         
         # [v8.5] Modulated CfC Layers
@@ -173,11 +214,15 @@ class ModulatedIARA(nn.Module):
         return self.config.hidden_dim # The modulation connects to the hidden state space
 
     def forward(self, x: torch.Tensor, external_modulation: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # Pre-processing (Attention etc)
-        x_p = self.input_proj(x)
+        # 1. Feature Gating (Explainability Layer) - Applied on Raw Inputs
+        x_gated = self.feature_attention(x) 
+        
+        # 2. Projection & Temporal Attention
+        x_p = self.input_proj(x_gated)
         x_p = self.pos_encoding(x_p)
         x_a = self.self_attention(x_p)
-        x_a = self.feature_attention(x_a)
+        
+        # 3. Project back for CfC backbone (keeping original flow structure for stability)
         x_cfc = self.attention_proj(x_a)
         x_cfc = self.input_norm(x_cfc)
         

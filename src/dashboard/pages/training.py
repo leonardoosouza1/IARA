@@ -65,6 +65,25 @@ def render():
                 st.markdown("Go to **Live Monitor** tab to see telemetry.")
             else:
                 st.warning("⚪ SYSTEM IDLE")
+            
+            # Leaderboard Display
+            leaderboard_path = os.path.join(LOG_DIR, "leaderboard.json")
+            if os.path.exists(leaderboard_path):
+                try:
+                    with open(leaderboard_path, "r") as f:
+                        lb_data = json.load(f)
+                    
+                    st.markdown("#### 🏆 Top Models")
+                    if lb_data:
+                        best = lb_data[0]
+                        st.metric("Best Loss", f"{best['loss']:.4f}", f"Epoch {best['epoch']}")
+                        
+                        lb_df = pd.DataFrame(lb_data)[["epoch", "loss", "timestamp"]]
+                        st.dataframe(lb_df, height=150, hide_index=True)
+                    else:
+                        st.info("No models ranked yet.")
+                except:
+                    pass
 
         if launch_btn:
             cmd = ["python3", TRAIN_SCRIPT, "--epochs", str(epochs), "--lr", str(lr), "--batch_size", str(batch_size)]
@@ -91,9 +110,8 @@ def render():
         st.markdown("### 📡 Real-time Telemetry")
         placeholder = st.empty()
         
-        if st.toggle("Auto-Refresh Monitor", value=True):
-            time.sleep(1)
-            st.rerun()
+        auto_refresh = st.toggle("Auto-Refresh Monitor", value=True)
+
             
         if os.path.exists(METRICS_FILE):
             try:
@@ -129,10 +147,44 @@ def render():
         if not os.path.exists(SNAPSHOT_DIR):
             st.warning(f"No snapshots found in {SNAPSHOT_DIR}")
         else:
-            snapshots = sorted([f for f in os.listdir(SNAPSHOT_DIR) if f.endswith(".json")])
+            # Sort properly by epoch number (integer)
+            try:
+                snapshots = sorted(
+                    [f for f in os.listdir(SNAPSHOT_DIR) if f.endswith(".json")],
+                    key=lambda x: int(x.split("_")[1].split(".")[0])
+                )
+            except:
+                snapshots = sorted([f for f in os.listdir(SNAPSHOT_DIR) if f.endswith(".json")]) # Fallback
+
             if not snapshots:
                 st.warning("No snapshots available yet.")
             else:
+                # --- SNAPSHOT MANAGEMENT ---
+                with st.expander("🗑️ Manage Snapshots (Clean History)"):
+                    to_delete = st.multiselect("Select snapshots to remove:", snapshots)
+                    if st.button(f"Delete {len(to_delete)} Snapshots", type="primary", disabled=len(to_delete)==0):
+                        for snap in to_delete:
+                            try:
+                                os.remove(os.path.join(SNAPSHOT_DIR, snap))
+                            except Exception as e:
+                                st.error(f"Failed to delete {snap}: {e}")
+                        st.toast(f"Deleted {len(to_delete)} snapshots.", icon="🗑️")
+                        time.sleep(1)
+                        st.rerun()
+
+                # Re-read snapshots after potential deletion
+                try:
+                    snapshots = sorted(
+                        [f for f in os.listdir(SNAPSHOT_DIR) if f.endswith(".json")],
+                        key=lambda x: int(x.split("_")[1].split(".")[0])
+                    )
+                except:
+                     snapshots = sorted([f for f in os.listdir(SNAPSHOT_DIR) if f.endswith(".json")])
+
+                if not snapshots:
+                    st.warning("No snapshots available after cleanup.")
+                    st.stop()
+                
                 selected_snap = st.selectbox("Select Epoch Snapshot", snapshots, index=len(snapshots)-1)
                 
                 # Load Data
@@ -143,7 +195,15 @@ def render():
                 # expert_conviction: {long: [], short: []}
                 long_curve = data["expert_conviction"]["long"]
                 short_curve = data["expert_conviction"]["short"]
-                inputs = data["sample_input"] # [Seq]
+                
+                # Handle inputs for seq_len calculation
+                if "ohlc" in data:
+                    inputs = data["ohlc"]["close"] # Use Close price as reference
+                elif "sample_input" in data:
+                     inputs = data["sample_input"]
+                else:
+                     inputs = [0] * len(long_curve) # Fallback empty
+                
                 seq_len = len(inputs)
                 
                 # Defensive Fix for Legacy/Scalar Snapshots
@@ -166,44 +226,187 @@ def render():
                 # 2. Time Travel Slider
                 selected_tick = st.slider("⏳ Time Travel (Tick)", 0, seq_len-1, seq_len-1)
                 
-                # 3. Visualizations
-                col_f1, col_f2 = st.columns([2, 1])
+                # 3. Visualizations (The Visual Cortex)
                 
-                with col_f1:
-                    st.subheader("🔎 Decision Architecture")
+                # Layout:
+                # [ Candlestick Chart with Trade Markers ]
+                # [ Neural Heatmap (Spectrogram)         ]
+                
+                # --- A. Context & Market Data ---
+                # Retrieve OHLC from snapshot if available, else mocking it for legacy snapshots would be hard.
+                # Assuming new snapshots have 'ohlc' key.
+                
+                has_ohlc = "ohlc" in data
+                
+                col_cortex_1, col_cortex_2 = st.columns([3, 1])
+                
+                with col_cortex_1:
+                    st.subheader("👁️ Visual Cortex (Market View)")
                     
-                    # Chart: Price vs Expert Activation
-                    # We want to see price history up to Tick, and Expert decision AT Tick.
+                    if has_ohlc:
+                        ohlc = data["ohlc"]
+                        times = ohlc["time"]
+                        opens = ohlc["open"]
+                        highs = ohlc["high"]
+                        lows = ohlc["low"]
+                        closes = ohlc["close"]
+                        
+                        # Trim to seq_len just in case
+                        times = times[:seq_len]
+                        opens = opens[:seq_len]
+                        highs = highs[:seq_len]
+                        lows = lows[:seq_len]
+                        closes = closes[:seq_len]
+                        
+                        fig = go.Figure()
+                        
+                        # 1. Candlestick Main
+                        fig.add_trace(go.Candlestick(
+                            x=list(range(seq_len)),
+                            open=opens, high=highs, low=lows, close=closes,
+                            name="Market",
+                            increasing_line_color='#00CC96', decreasing_line_color='#FF4B4B'
+                        ))
+                        
+                        # 2. Brain Overlays (Trade Markers)
+                        # Identify points of high conviction
+                        buy_signals = [i for i, v in enumerate(long_curve) if v > 1.5] # Threshold 1.5
+                        sell_signals = [i for i, v in enumerate(short_curve) if v > 1.5]
+                        
+                        if buy_signals:
+                            fig.add_trace(go.Scatter(
+                                x=buy_signals, 
+                                y=[lows[i] * 0.9995 for i in buy_signals],
+                                mode='markers',
+                                marker=dict(symbol='triangle-up', size=12, color='#00CC96'),
+                                name="AI Buy Conviction"
+                            ))
+                            
+                        if sell_signals:
+                             fig.add_trace(go.Scatter(
+                                x=sell_signals, 
+                                y=[highs[i] * 1.0005 for i in sell_signals],
+                                mode='markers',
+                                marker=dict(symbol='triangle-down', size=12, color='#FF4B4B'),
+                                name="AI Sell Conviction"
+                            ))
+                            
+                        # 3. Time Travel Marker
+                        fig.add_vline(x=selected_tick, line_width=2, line_dash="dash", line_color="yellow")
+                        
+                        fig.update_layout(
+                            title="Market Context + AI Intent",
+                            template="plotly_dark",
+                            xaxis_rangeslider_visible=False,
+                            height=400,
+                            margin=dict(l=0, r=0, t=30, b=0)
+                        )
+                        st.plotly_chart(fig, key="cortex_chart", use_container_width=True)
+                        
+                    else:
+                        st.warning("⚠️ Legacy Snapshot: No OHLC Data found. Run new training to see Visual Cortex.")
+                        # Fallback to simple line
+                        fig = px.line(y=inputs, title="Normalized Input (Legacy)")
+                        fig.add_vline(x=selected_tick, line_color="yellow")
+                        st.plotly_chart(fig, use_container_width=True)
+
+                with col_cortex_2:
+                    st.subheader("🧠 Synaptic Map")
                     
-                    # Expert Bar Chart
+                    # 1. Expert Bar Chart (Current Tick)
                     expert_fig = go.Figure()
                     expert_fig.add_trace(go.Bar(
-                        x=["Long Expert", "Short Expert"],
+                        x=["Long", "Short"],
                         y=[long_curve[selected_tick], short_curve[selected_tick]],
                         marker_color=['#00CC96', '#FF4B4B'],
                         text=[f"{long_curve[selected_tick]:.2f}", f"{short_curve[selected_tick]:.2f}"],
                         textposition='auto'
                     ))
-                    expert_fig.update_layout(title=f"Expert Conviction at Tick {selected_tick}", template="plotly_dark", yaxis_range=[-5, 5])
-                    st.plotly_chart(expert_fig, key="expert_chart", use_container_width=True)
+                    expert_fig.update_layout(
+                        title=f"Conviction (Tick {selected_tick})", 
+                        template="plotly_dark", 
+                        yaxis_range=[-2, 5],
+                        height=200,
+                        margin=dict(l=0, r=0, t=30, b=0)
+                    )
+                    st.plotly_chart(expert_fig, key="expert_conviction_bar", use_container_width=True)
                     
-                    # Price Context Chart
-                    price_fig = px.line(y=inputs[:selected_tick+1], title="Market Context (What the Brain Saw)", template="plotly_dark")
-                    price_fig.add_vline(x=selected_tick, line_dash="dash", line_color="yellow")
-                    st.plotly_chart(price_fig, key="price_chart", use_container_width=True)
-
-                with col_f2:
-                    st.subheader("🧠 Neural Activity")
                     
-                    # Feature Importance (Global for this sample)
+                    # 2. Feature Gating (Global)
                     feats = data["feature_importance"]
-                    feat_fig = px.bar(x=list(range(len(feats))), y=feats, title="Feature Gating (Global)", labels={'x': 'Feature ID', 'y': "Gate Open %"}, template="plotly_dark")
-                    st.plotly_chart(feat_fig, key="feat_chart", use_container_width=True)
                     
-                    # Hidden State Heatmap (Current Tick)
-                    # hidden_activity is [Hidden, Seq]. We want the column at selected_tick
-                    hidden_state = np.array(data["hidden_activity"]) # [Hidden, Seq]
-                    current_hidden = hidden_state[:, selected_tick].reshape(16, 8) # Reshape 128 to 16x8 grid
+                    # Map Feature Indices to Names (Based on train_v8.py generator)
+                    # 0=NormClose, 1=NormMom, 2=NormVol, 3..15=Noise
+                    feat_names = []
+                    for i in range(len(feats)):
+                        if i == 0: feat_names.append("F0: Price")
+                        elif i == 1: feat_names.append("F1: Momentum")
+                        elif i == 2: feat_names.append("F2: Volatility")
+                        else: feat_names.append(f"F{i}: Noise")
+                        
+                    # Top 5 Features
+                    indices = np.argsort(feats)[::-1][:5]
+                    top_feats = [feats[i] for i in indices]
+                    top_names = [feat_names[i] for i in indices]
                     
-                    heatmap_fig = px.imshow(current_hidden, title=f"Neuron Activation (Tick {selected_tick})", color_continuous_scale="Viridis", template="plotly_dark")
-                    st.plotly_chart(heatmap_fig, key="heatmap_chart", use_container_width=True)
+                    feat_fig = px.bar(x=top_names, y=top_feats, title="Active Senses (Input Gating)", template="plotly_dark", height=200)
+                    feat_fig.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+                    st.plotly_chart(feat_fig, key="feat_imp_chart", use_container_width=True)
+
+                # --- B. System 2 Narrative (The "Thought") ---
+                # Mocking logic to generate "Language" from the internal state
+                sys2_msg = ""
+                top_idx = indices[0]
+                expert_diff = long_curve[selected_tick] - short_curve[selected_tick]
+                
+                if top_idx == 0: focus = "Price Action"
+                elif top_idx == 1: focus = "Momentum Acceleration"
+                elif top_idx == 2: focus = "Volatility/Risk"
+                else: focus = "Market Noise"
+                
+                if expert_diff > 1.0:
+                    intent = "Strong BUY"
+                    reason = "Upward pressure confirmed."
+                elif expert_diff < -1.0:
+                    intent = "Strong SELL"
+                    reason = "Downward pressure confirmed."
+                else:
+                    intent = "HOLD"
+                    reason = "Uncertainty in signal."
+                    
+                sys2_msg = f"**System 2 Analysis**: Focusing heavily on **{focus}**. Detect {intent} signal. {reason} (Confidence: {abs(expert_diff):.2f})"
+                
+                st.info(sys2_msg, icon="🧠")
+
+                # --- C. Neural Spectrogram (Bottom) ---
+                st.markdown("#### ⚡ Neural Activation Spectrogram")
+                # Ensure we have the full sequence of hidden states
+                hidden_state = np.array(data["hidden_activity"]) # [Hidden, Seq]
+                
+                # Trim to seq_len
+                hidden_state = hidden_state[:, :seq_len]
+                
+                # Colorscale: Magma or Viridis. Magma looks more "electric".
+                spectro_fig = px.imshow(
+                    hidden_state, 
+                    labels=dict(x="Time (Tick)", y="Neuron ID", color="Activation"),
+                    x=list(range(seq_len)),
+                    color_continuous_scale="Magma",
+                    template="plotly_dark",
+                    aspect="auto",
+                    height=250
+                )
+                spectro_fig.update_layout(
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    xaxis_title="Time Sequence"
+                )
+                # Mark current tick
+                spectro_fig.add_vline(x=selected_tick, line_color="yellow", line_width=2)
+                
+                st.plotly_chart(spectro_fig, key="spectrogram", use_container_width=True)
+
+    # Auto-Refresh Logic (Moved to end to prevent blocking)
+    if auto_refresh:
+        time.sleep(1)
+        st.rerun()
+
