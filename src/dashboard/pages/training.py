@@ -151,6 +151,17 @@ def render():
                     long_curve = [long_curve] * seq_len
                 if isinstance(short_curve, (float, int)):
                     short_curve = [short_curve] * seq_len
+                    
+                # Robustness: Ensure list length matches seq_len
+                if len(long_curve) < seq_len:
+                     # Pad with last value
+                     long_curve += [long_curve[-1]] * (seq_len - len(long_curve))
+                if len(short_curve) < seq_len:
+                     short_curve += [short_curve[-1]] * (seq_len - len(short_curve))
+                
+                # Truncate if too long
+                long_curve = long_curve[:seq_len]
+                short_curve = short_curve[:seq_len]
                 
                 # 2. Time Travel Slider
                 selected_tick = st.slider("⏳ Time Travel (Tick)", 0, seq_len-1, seq_len-1)
