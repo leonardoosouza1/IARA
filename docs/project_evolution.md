@@ -91,6 +91,19 @@ Despite the robust engine, the model stuck at ~50% accuracy (Random Guess).
 *   **Class Balance:** achieved near-perfect 50/50 split naturally.
 *   **Result:** We moved from "Predicting Price" to "Identifying Flow". The AI no longer guesses; it waits for fractal alignment.
 
+### v7.0 - The MLOps Evolution
+**Problem:** Local file-based logging (`.txt`, `.jsonl`) and disparate tools made it impossible to scale experiments or analyze history effectively.
+**Solution:** **SACI Protocol V7 Infrastructure.**
+1.  **TimescaleDB**: Unified SQL + TimeSeries database for market data and "Brain States" (Simulation History).
+2.  **MLflow**: Centralized experiment tracking (Parameters, Metrics, Artifacts).
+3.  **MinIO**: S3-compatible object storage for heavy artifacts (Model Checkpoints, Datasets).
+4.  **Containerization**: `docker-compose-mlops.yml` orchestrates the entire intelligence stack.
+
+**Final Impact:**
+*   **Reproducibility**: Every model run is versioned and trackable.
+*   **Scalability**: The system can now handle massive datasets and concurrent experiments.
+*   **Visibility**: Real-time dashboards reading directly from the database (Trade Hub).
+
 ---
 
 ## Summary of Major Technical Breakthroughs
@@ -101,6 +114,7 @@ Despite the robust engine, the model stuck at ~50% accuracy (Random Guess).
 | **Fractal Stride** | v6.1 | Context Window too short / Training too slow |
 | **CPU Feature Factory** | v6.9 | ROCm HIPBLAS Errors & Data Loading Bottlenecks |
 | **Hierarchical Curation** | v6.11 | Low Signal-to-Noise Ratio (AUC ~0.50) |
+| **MLOps Infrastructure** | v7.0 | Lack of Experiment Tracking & Scalable Storage |
 
 ## Conclusion
 The evolution of I.A.R.A. demonstrates that in financial machine learning, **Architecture < Data Curation**. No amount of LSTM/Transformer complexity could solve the foundational issue of market noise. The breakthrough came not from a smarter neuron, but from a smarter **teacher** (The Hierarchical Curator) that refuses to train the model on ambiguous data.

@@ -44,13 +44,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # SACI V7: MLflow Setup
-MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
-try:
-    mlflow.set_tracking_uri(MLFLOW_URI)
-    mlflow.set_experiment("SACI_Liquid_Brain_v6")
-    logger.info(f"MLflow connected at {MLFLOW_URI}")
-except Exception as e:
-    logger.warning(f"MLflow connection failed: {e}")
+def setup_mlflow():
+    MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+    try:
+        mlflow.set_tracking_uri(MLFLOW_URI)
+        mlflow.set_experiment("SACI_Operations_V1")
+        logger.info(f"MLflow connected at {MLFLOW_URI}")
+    except Exception as e:
+        logger.warning(f"MLflow connection failed: {e}")
 
 # Paths
 DATA_PROCESSED_DIR = Path(__file__).parent.parent.parent / "data" / "processed"
@@ -323,7 +324,7 @@ class Trainer:
         val_dataset: Optional[torch.utils.data.Dataset] = None
     ):
         self.config = config
-        self.device = config.device
+        self.device = device
         self.use_mlflow = True
         
         # Directories
@@ -777,7 +778,7 @@ class Trainer:
         if self.use_mlflow:
             try:
                 mlflow.end_run() # Close any previous run if it exists
-                mlflow.start_run(run_name=f"Liquid_v6_{int(time.time())}")
+                mlflow.start_run(run_name=f"Ops_Run_{int(time.time())}")
                 mlflow.log_params(asdict(self.config)) # Use asdict for dataclass
                 logger.info(f"MLflow run started: {mlflow.active_run().info.run_id}")
             except Exception as e:
@@ -930,6 +931,10 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+
+    # V7: Init MLflow
+    setup_mlflow()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # v6.9 Hybrid Engine: Check for pre-computed cache

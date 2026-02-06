@@ -1,7 +1,7 @@
-# I.A.R.A. v6.1 Architecture Documentation
+# I.A.R.A. v7.0 Architecture Documentation
 
 ## 1. Overview
-Input-Aware Recurrent Agent (I.A.R.A.) v6.1 represents a significant evolution in time-series forecasting for high-frequency forex markets. Unlike standard LSTM/GRU approaches, I.A.R.A. leverages **Liquid Time-Constant (LTC)** theory via **Closed-form Continuous (CfC)** cells to model the hidden state dynamics, allowing it to adapt to varying market volatility regimes effectiveness.
+Input-Aware Recurrent Agent (I.A.R.A.) v7.0 represents a significant evolution in time-series forecasting for high-frequency forex markets. Supported on a robust MLOps infrastructure (SACI Protocol V7), I.A.R.A. leverages **Liquid Time-Constant (LTC)** theory via **Closed-form Continuous (CfC)** cells to model hidden state dynamics.
 
 ## 2. Model Architecture
 The model pipeline processes a sequence of market data ($T=256$) to predict the probability of a positive return in the near future.
@@ -67,3 +67,30 @@ We STRICTLY avoid random splitting.
 - **Train**: First 80% of time-sorted data.
 - **Val**: Last 20% of time-sorted data.
 - This ensures the model is predicting the *future* and not interpolating missing points from the past, providing a realistic OOS (Out-of-Sample) metric.
+
+## 5. MLOps Infrastructure (SACI Protocol V7)
+
+The system operates on a containerized microservices architecture coordinated by `docker-compose-mlops.yml`.
+
+### Components
+1.  **SACI Brain (Container)**:
+    - Runtime: Python 3.10+ (ROCm/CUDA).
+    - Role: Training, Inference, and Simulation.
+    - Integration: Logs metrics to MLflow, writes states to TimescaleDB.
+
+2.  **TimescaleDB (Database)**:
+    - Role: Primary persistent storage.
+    - Tables: `market_candles` (Ohlcv), `brain_states` (Inference logs), `trades`.
+    - Features: Hypertable partitioning for time-series efficiency.
+
+3.  **MLflow (Tracking Server)**:
+    - Role: Experimentation Lab.
+    - Tracking: Hyperparameters (`seq_len`, `lr`), Metrics (`AUC`, `Loss`), Artifacts (Models).
+
+4.  **MinIO (Object Storage)**:
+    - Role: Artifact Vault.
+    - Stores: Heavy binaries (Model `.pt` files, Parquet datasets) for MLflow.
+
+5.  **Dashboard (Viz)**:
+    - Role: User Interface.
+    - Connectivity: Reads real-time simulation data from TimescaleDB (Port 8501).

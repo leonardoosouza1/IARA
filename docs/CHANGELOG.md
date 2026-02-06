@@ -1,16 +1,14 @@
 # Changelog - SACI Project
 
 ## [V7 - MLOps Era] - Thursday, Feb 5 2026 (Current)
-### Infrastructure (Planned)
-- **SACI Protocol V7**: MLOps Architecture Pivot.
-    - **TimescaleDB**: PostgreSQL specialized for Tick Data.
-    - **MLflow**: Professional Experiment Tracking.
-    - **MinIO**: Local "S3" for Artifact Storage.
-
 ### Implemented
-- **Trade Hub**: Simulated Trading Engine (`src/trading/simulation.py`) and Real-Time Dashboard Tab.
-- **Neuroscope**: Deep Explainability (Logic Log, Macro vs Micro Trend Viz).
-- **Fixes**: Dashboard 18-feature vector alignment.
+- **SACI Protocol V7**: Full MLOps Architecture.
+    - **TimescaleDB**: Integrated for BrainState persistence (`src/trading/simulation.py`).
+    - **MLflow**: Connected for experiment tracking (`SACI_Operations_V1`).
+    - **MinIO**: Artifact storage configuration verified.
+    - **Dashboard**: Connected to TimescaleDB for "Trade Hub" replay.
+- **Trade Hub**: Automated Simulation (`src/run_simulation.py`) and Real-Time Dashboard.
+- **Fixes**: MLflow 403 Security, Docker Dependency Injection, Dashboard DB Grid.
 
 ---
 

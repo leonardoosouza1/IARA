@@ -1,10 +1,10 @@
-# I.A.R.A. v6.1 (Fractal Attention-CfC)
+# I.A.R.A. v7.0 (SACI Protocol)
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-ROCm-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**I.A.R.A. v6.1 (Fractal Attention-CfC)** is an advanced algorithmic trading system powered by **I.A.R.A. (Intelligent Algorithmic Recurrent Agent)**. The system utilizes **Liquid Neural Networks (LNN)** with **Closed-form Continuous (CfC)** cells and a novel **Fractal Attention** mechanism to predict short-term currency trends with high robustness against market noise and "fakeouts".
+**I.A.R.A. v7.0 (SACI Protocol)** is an advanced algorithmic trading system powered by **I.A.R.A. (Intelligent Algorithmic Recurrent Agent)**. The system utilizes **Liquid Neural Networks (LNN)** with **Closed-form Continuous (CfC)** cells and a novel **Fractal Attention** mechanism, supported by a professional **MLOps Infrastructure** (TimescaleDB, MLflow).
 
 Designed for performance on **AMD RDNA2 GPUs (ROCm)** via Docker.
 
@@ -55,35 +55,37 @@ docker compose build
 ### 3. Usage
 All commands are run inside the Docker container.
 
-#### Start the Container
+#### Start the MLOps Stack
 ```bash
-docker compose up -d
+docker compose -f docker-compose-mlops.yml up -d
 ```
+*Services started: saci-brain, db (Timescale), mlflow, minio.*
 
 #### A. Data Processing
 Process raw parquet files (Ohlc data) into model-ready features.
 ```bash
-docker compose exec saci-brain python src/data/processor.py
+docker compose -f docker-compose-mlops.yml exec saci-brain python src/data/processor.py
 ```
 
 #### B. Training (Standard)
 Train the Agile I.A.R.A. model from scratch.
 ```bash
-docker compose exec saci-brain python src/train/trainer_liquid.py \
+docker compose -f docker-compose-mlops.yml exec saci-brain python src/train/trainer_liquid.py \
     --epochs 200 \
     --batch-size 1024 \
     --seq-len 256
 ```
+*Logs training metrics to http://localhost:5000 (MLflow).*
 *Features: Auto-Rollback, Hard Mining enabled by default.*
 
 #### C. Fine-Tuning (Polishing)
 Refine a trained model with lower learning rate.
 ```bash
 # 1. Rollback to best state
-docker compose exec saci-brain cp checkpoints/best_model.pth checkpoints/latest.pth
+docker compose -f docker-compose-mlops.yml exec saci-brain cp checkpoints/best_model.pth checkpoints/latest.pth
 
 # 2. Resume with low LR
-docker compose exec saci-brain python src/train/trainer_liquid.py \
+docker compose -f docker-compose-mlops.yml exec saci-brain python src/train/trainer_liquid.py \
     --epochs 100 \
     --batch-size 1024 \
     --lr 0.0001 \
@@ -93,10 +95,9 @@ docker compose exec saci-brain python src/train/trainer_liquid.py \
 #### D. Signal Generation (Production)
 Generate live trading signals with Active Learning adaptation.
 ```bash
-docker compose exec saci-brain python src/trading/signal_generator.py \
-    --ticker EURUSD \
-    --path data/raw/EURUSD.parquet
+docker compose -f docker-compose-mlops.yml exec saci-brain python -m src.run_simulation
 ```
+*Visualizes results in the Dashboard (http://localhost:8501).*
 *Output: JSON signal with confidence, direction, and regime adjustment.*
 
 

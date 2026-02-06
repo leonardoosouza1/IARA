@@ -11,6 +11,11 @@ yfinance
 # AI Core
 einops
 scikit-learn
+# PyTorch ROCm (Install via: pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2)
+torch
+torchvision
+torchaudio
+
 
 # Utilities
 tqdm
@@ -18,6 +23,12 @@ PyYAML
 
 # GPU Kernels (ROCm Compatible)
 triton>=2.1.0
+
+# LLM & NLP (Trinity Engine)
+transformers
+# Install with: CMAKE_ARGS="-DLLAMA_HIPBLAS=on" pip install llama-cpp-python
+llama-cpp-python
+chardet
 
 # Visualization
 matplotlib

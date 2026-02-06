@@ -442,6 +442,17 @@ with tab_hub:
         else:
             st.info("Simulation Ready. Press Step to start.")
             
+        st.divider()
+        st.subheader("💾 TimescaleDB History (Latest 10)")
+        try:
+             dsn = os.getenv("DB_URI", "postgresql://saci:saci_secret@localhost:5432/saci_core")
+             conn = psycopg2.connect(dsn)
+             df_db = pd.read_sql("SELECT time, symbol, prob_up, confidence, trend_m5, trend_h1, logic_log FROM brain_states ORDER BY time DESC LIMIT 10", conn)
+             st.dataframe(df_db)
+             conn.close()
+        except Exception as e:
+            st.warning(f"DB not connected: {e}")
+            
     else:
         st.error("Model not loaded.")
 

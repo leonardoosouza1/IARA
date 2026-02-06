@@ -8,6 +8,10 @@ from typing import List, Dict, Optional, Tuple
 
 from src.data.feature_factory import process_hierarchical
 from src.train.trainer_liquid import TrainerConfig
+import psycopg2
+import os
+import json
+import time
 
 @dataclass
 class Trade:
@@ -38,6 +42,16 @@ class MarketSimulator:
         self.ticker = ticker
         self.device = device
         
+        # SACI V7: Database Connection
+        self.db_conn = None
+        try:
+            dsn = os.getenv("DB_URI", "postgresql://saci:saci_secret@localhost:5432/saci_core")
+            self.db_conn = psycopg2.connect(dsn)
+            self.db_conn.autocommit = True
+            print("✅ MarketSimulator connected to TimescaleDB")
+        except Exception as e:
+            print(f"⚠️ DB Connection failed: {e}. Simulation will run in RAM only.")
+
         # State
         self.initial_balance = 1000.0
         self.balance = 1000.0
@@ -52,7 +66,12 @@ class MarketSimulator:
     def load_data(self):
         """Loads data using Feature Factory logic to ensure feature parity."""
         # Config placeholder (assuming 256 seq_len from trained model)
-        seq_len = self.model.config.seq_len if hasattr(self.model, 'config') else 256
+        seq_len = 256
+        if hasattr(self.model, 'config'):
+            if hasattr(self.model.config, 'seq_len'):
+                seq_len = self.model.config.seq_len
+            elif hasattr(self.model.config, 'max_seq_len'):
+                seq_len = self.model.config.max_seq_len
         
         # Try raw paths
         candidates = [
@@ -205,6 +224,32 @@ class MarketSimulator:
         )
         self.history.append(brain_state)
         
+        # V7: Persist State
+        self.save_state_to_db(brain_state)
+        
         self.current_step += 1
         return brain_state
+
+    def save_state_to_db(self, state: BrainState):
+        if not self.db_conn:
+            return
+
+        try:
+            with self.db_conn.cursor() as cur:
+                # Table schema: time, symbol, run_id, prob_up, confidence, trend_m5, trend_h1, features, logic_log
+                cur.execute("""
+                    INSERT INTO brain_states (time, symbol, run_id, prob_up, confidence, trend_m5, trend_h1, logic_log)
+                    VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    self.ticker,
+                    "sim_v1", # Temporary Run ID
+                    state.prob,
+                    state.confidence,
+                    state.trend_m5,
+                    state.trend_h1,
+                    state.logic_log
+                ))
+        except Exception as e:
+            print(f"DB Write Error: {e}")
+            self.db_conn = None # Disable DB on error to avoid spam
 

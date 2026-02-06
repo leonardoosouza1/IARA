@@ -1,4 +1,4 @@
-version: '3.8'
+
 
 services:
   # 1. Cérebro de Dados (TimescaleDB + pgvector)
@@ -16,6 +16,11 @@ services:
     networks:
       - saci-net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U saci"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # 2. Laboratório de Experimentos (MLflow)
   mlflow:
@@ -29,14 +34,18 @@ services:
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=minio123
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - MLFLOW_GUNICORN_OPTS=--forwarded-allow-ips '*'
     command: >
       mlflow server
       --backend-store-uri postgresql://saci:saci_secret@db:5432/mlflow
       --default-artifact-root s3://mlflow/
       --host 0.0.0.0
+      --gunicorn-opts "--forwarded-allow-ips '*'"
     depends_on:
-      - db
-      - minio
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_started
     networks:
       - saci-net
 
@@ -71,18 +80,22 @@ services:
     container_name: saci-brain
     volumes:
       - .:/app
+    ports:
+      - "8501:8501"
     environment:
       - DB_URI=postgresql://saci:saci_secret@db:5432/saci_core
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - HSA_OVERRIDE_GFX_VERSION=10.3.0
       - PYTHONPATH=/app
     depends_on:
-      - db
-      - mlflow
+      db:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
     networks:
       - saci-net
     command: >
-      /bin/bash -c "pip install mlflow psycopg2-binary boto3 sqlalchemy && tail -f /dev/null"
+      /bin/bash -c "CMAKE_ARGS='-DLLAMA_HIPBLAS=on' pip install -r requirements.txt && streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0"
     
     # GPU & Security (ROCm Config)
     shm_size: '8gb'
