@@ -3,7 +3,6 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-ROCm-orange)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-red)
-![License](https://img.shields.io/badge/License-MIT-green)
 
 **I.A.R.A. "Trinity Engine" (Protocol Trinity)** is the next evolution of the SACI trading system. It moves beyond a single model to a **Tri-Cameral Architecture** inspired by the human brain (System 1 vs System 2) and MLOps best practices.
 
