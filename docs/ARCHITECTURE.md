@@ -1,96 +1,88 @@
-# I.A.R.A. v7.0 Architecture Documentation
+# I.A.R.A. v8.5 Trinity Engine Architecture
 
-## 1. Overview
-Input-Aware Recurrent Agent (I.A.R.A.) v7.0 represents a significant evolution in time-series forecasting for high-frequency forex markets. Supported on a robust MLOps infrastructure (SACI Protocol V7), I.A.R.A. leverages **Liquid Time-Constant (LTC)** theory via **Closed-form Continuous (CfC)** cells to model hidden state dynamics.
+## 1. Overview: The Tri-Cameral Brain
+I.A.R.A. v8.5 "Trinity" represents a paradigm shift from a monolithic model to a **Tri-Cameral Architecture**, inspired by the breakdown of human cognition into **System 1 (Fast)**, **System 2 (Slow)**, and a **Reflexive Guard (Sentinel)**.
 
-## 2. Model Architecture
-The model pipeline processes a sequence of market data ($T=256$) to predict the probability of a positive return in the near future.
+This design addresses the core limitation of previous versions: *The inability to stop trading during black swan events or regime shifts.*
 
-### Data Flow
-1.  **Input ($B, 256, 15$)**: Batch of 256 time-steps with 15 engineered features.
-2.  **Projection**: Linear map to Hidden Dimension ($d=512$).
-3.  **Learned Positional Encoding**: Adds learnable vectors to embed temporal order. Crucial for differentiation between "immediate past" and "distant past" in the 256-step window.
-4.  **Temporal Self-Attention**:
-    - 4-Head Attention Mechanism.
-    - Captures long-range dependencies (e.g., support/resistance levels formed 3 hours ago).
-    - *Optimization*: Feed-Forward network removed in v6.1 Lite for speed.
-5.  **Feature Attention Gate**:
-    - A learnable Gating Unit (Sigmoid) that suppresses irrelevant features dynamically per time-step.
-    - Functions as a "noise filter" for indicators ensuring only valid signals pass through.
-6.  **CfC Recurrent Backbone**:
-    - **Closed-form Continuous Cell**.
-    - Solves the differential equation of a liquid neural network in closed form.
-    - **Symmetric tanh gating**: Ensures gradient flow remains stable even over 256 steps without vanishing gradients.
-    - Clipping: Hidden states clipped to $[-1, 1]$ for stability.
-7.  **Head**:
-    - Layer Norm -> Dropout (0.5) -> Linear -> Output Logits.
+---
 
-## 3. Data Engineering Strategy
+## 2. System Architecture
 
-### Feature Set (15 Dimensions)
-We use a robust set of indicators to capture multiple market facets.
+### ⚡ System 1: The Fast Brain (Liquid Neural Network)
+Responsible for millisecond-level execution. It is always "on" and looking for patterns.
+*   **Core**: `ModulatedIARA` (LTC/CfC Backbone).
+*   **Input**: 256-step Time Series (Technical Indicators).
+*   **Enhancements**:
+    *   **Fractal Attention**: Focuses on relevant historical windows.
+    *   **Expert Mixture**: Two specialized "Experts" (Linear Layers) trained for Long and Short biases respectively.
+    *   **Feature Gating**: A learnable attention mechanism that assigns importance to each input feature (e.g., ignoring RSI when Volume is low).
 
-| Category | Indicators | Purpose |
-| :--- | :--- | :--- |
-| **Momentum** | **RSI** (14) | Overbought/Oversold detection. |
-| | **Stoch %K, %D** (14, 3) | **Critical** for v6.0. Filters fake breakouts/divergences. |
-| **Trend** | **MACD** (Line, Signal, Hist) | Trend following and reversal strength. |
-| | **ADX** (14) | Trend strength (distinguishes chop vs. trend). |
-| **Volatility** | **Bollinger Bands** (%B, Width) | Volatility expansion/contraction (squeeze). |
-| | **ATR** (14) | Absolute volatility measurement. |
-| **Dynamics** | **Price Velocity** | rate-of-change (1st, derivative). |
-| **Time** | **Sin/Cos encoding** | Hour of day & Day of week cyclic features. |
+### 🛡️ System 2: The Sentinel (Watchdog)
+A reflexive, rule-based inhibition system that overrides System 1.
+*   **Role**: The "Amygdala" – instantaneous fear response.
+*   **Triggers**:
+    *   **News DEFCON**: Keyword scanning in real-time news feeds (War, Fed Rates, Disaster).
+    *   **Volatility Spikes**: VIX or ATR explosions.
+*   **Mechanism**: **Gradient Interlock**. It doesn't just "filter" trades; it physically zeroes out the output logits of the Neural Network, preventing the signal from ever reaching the execution layer.
 
-### Unified Normalization
-Instead of scaling each asset individually, we use a **Global StandardScaler**:
-- Fitted on **pooled** data from all major pairs.
-- Preserves the *relative* volatility between assets (e.g., GBPUSD is naturally more volatile than EURUSD; individual scaling would destroy this signal).
-- State is saved to `data/scaler.pkl` for consistent inference.
+### 🧠 System 3: The Strategist (Slow System)
+A Large Language Model (LLM) operating asynchronously.
+*   **Core**: Quantized LLM (DeepSeek/Llama via `llama-cpp-python`).
+*   **Role**: Market Analyst.
+*   **Function**:
+    *   Reads macro reports and news summaries.
+    *   Sets a global **"Regime Bias"** (e.g., `Bearish`).
+    *   Modulates the Fast System's priors (e.g., "Harder to buy, easier to sell").
 
-## 4. Training Methodology
+---
 
-### Objective
-Binary Classification: **Will the price close higher $N$ steps from now?** (Log Return > 0).
+## 3. Data Flow & Tensor Shape
 
-### Key Components
-- **Optimizer**: AdamW (Weight Decay 1e-4) for regularization.
-- **Scheduler**: `ReduceLROnPlateau` (Halves LR if Val Loss stalls for 5 epochs).
-- **Loss Function**: `BCEWithLogitsLoss` with `pos_weight`.
-    - Automatically calculates class imbalance (Up vs Down) in the batch and adjusts weights to prevent bias towards the majority class.
-- **Regularization**:
-    - **Dropout 0.5**: Heavy dropout in the head to force distributed feature representation.
-    - **Label Smoothing 0.1**: Targets are $0.1 / 0.9$ instead of $0 / 1$. Prevents the model from becoming "overconfident" on noisy data.
-    - **Noise Injection**: Gaussian noise ($std=0.02$) added to input features during training to simulate market imperfections.
+### Input Pipeline ($B, 256, 17$)
+1.  **Market Data ($15$)**: OHLCV derived indicators (RSI, MACD, Bollinger, etc.).
+2.  **Context Embeddings ($2$)**:
+    *   `news_sentiment`: Float from System 3.
+    *   `regime_code`: Categorical embedding of the market state.
 
-### Chronological Validation
-We STRICTLY avoid random splitting.
-- **Train**: First 80% of time-sorted data.
-- **Val**: Last 20% of time-sorted data.
-- This ensures the model is predicting the *future* and not interpolating missing points from the past, providing a realistic OOS (Out-of-Sample) metric.
+### The Forward Pass
+1.  **Feature Gate**: $X' = X \odot \sigma(W_g X)$
+    *   *Filters out noise before it enters the expensive RNN.*
+2.  **Liquid Backbone**: $H_t = \text{CfC}(X'_t, H_{t-1})$
+    *   *Solves the continuous-time hidden state.*
+3.  **Expert Heads**:
+    *   $E_{long} = \text{Linear}(H_t)$
+    *   $E_{short} = \text{Linear}(H_t)$
+4.  **Conflict Resolution**: $Y = E_{long} - E_{short}$
+    *   *Buying requires high Long conviction AND low Short conviction.*
 
-## 5. MLOps Infrastructure (SACI Protocol V7)
+---
 
-The system operates on a containerized microservices architecture coordinated by `docker-compose-mlops.yml`.
+## 4. Operational Dashboard (Mission Control v2.0)
 
-### Components
-1.  **SACI Brain (Container)**:
-    - Runtime: Python 3.10+ (ROCm/CUDA).
-    - Role: Training, Inference, and Simulation.
-    - Integration: Logs metrics to MLflow, writes states to TimescaleDB.
+The interface is no longer just a log viewer; it is an active component of the feedback loop.
 
-2.  **TimescaleDB (Database)**:
-    - Role: Primary persistent storage.
-    - Tables: `market_candles` (Ohlcv), `brain_states` (Inference logs), `trades`.
-    - Features: Hypertable partitioning for time-series efficiency.
+### 🔬 Forensic Lab
+Allows the human operator to inspect the "Brain's" internal state.
+*   **Tick Slider**: Replay the 256-step inference window.
+*   **Heatmaps**:
+    *   **Feature Importance**: See which indicator triggered the trade.
+    *   **Neural Activity**: Visualize CfC hidden state saturation.
+*   **Conviction Plot**: Visual proof of *why* a trade was taken (Long/Short split).
 
-3.  **MLflow (Tracking Server)**:
-    - Role: Experimentation Lab.
-    - Tracking: Hyperparameters (`seq_len`, `lr`), Metrics (`AUC`, `Loss`), Artifacts (Models).
+### 🎛️ Ops Panel
+*   **DEFCON Gauge**: Real-time visual of the Sentinel's status.
+*   **Manual Override**: Physical "Kill Switch" to disconnect the execution engine.
 
-4.  **MinIO (Object Storage)**:
-    - Role: Artifact Vault.
-    - Stores: Heavy binaries (Model `.pt` files, Parquet datasets) for MLflow.
+---
 
-5.  **Dashboard (Viz)**:
-    - Role: User Interface.
-    - Connectivity: Reads real-time simulation data from TimescaleDB (Port 8501).
+## 5. MLOps Infrastructure
+
+*   **Training**: PyTorch Lightning loop logic (custom implemented) with MLflow logging.
+*   **Storage**:
+    *   **TimescaleDB**: Stores "Brain Snapshots" (Tensors) for replay.
+    *   **MinIO**: Stores model weights (`.pth`) and optimized ONNX exports.
+*   **Telemetry**: Real-time CSV logging for the Dashboard Streamlit app.
+
+---
+*Architecture definition locked for V8.5 Protocol Trinity.*

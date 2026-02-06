@@ -44,3 +44,17 @@
     - **Vanilla LSTMs**: Failed due to exploding gradients.
     - **Transformers**: High compute, low signal (Overfitting).
 - **Conclusion**: Financial data requires specialized architectures, not just "bigger" models.
+
+## [V8.5 - Protocol Trinity] - Friday, Feb 6 2026
+### The "Consciousness" Upgrade
+- **Trinity Engine**: Replaced monolithic model with **Tri-Cameral Architecture** (Fast/Sentinel/Slow).
+- **Dashboard v2.0**:
+    - **Forensic Lab**: Added "Time Travel" slider to replay model states tick-by-tick.
+    - **Brain MRI**: Visualizations for Feature Gating, Expert Conviction, and Neural Heatmaps.
+    - **Hot Reload**: Fixed Python caching issues for instant UI updates.
+- **Forensic Recorder**:
+    - Implemented  to capture full-sequence hidden states ().
+    - Fixed  by ensuring snapshot dimensions match the UI slider (64 ticks).
+- **Infrastructure**:
+    - **Defensive Coding**: Added robust type/length checks to validade legacy snapshots vs new ones.
+    - **Batch Size**: Increased limits to 1024 for high-end GPUs.

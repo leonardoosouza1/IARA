@@ -1,105 +1,73 @@
-# I.A.R.A. v7.0 (SACI Protocol)
+# I.A.R.A. v8.5 "Trinity Engine" (Protocol Trinity)
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-ROCm-orange)
+![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-red)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**I.A.R.A. v7.0 (SACI Protocol)** is an advanced algorithmic trading system powered by **I.A.R.A. (Intelligent Algorithmic Recurrent Agent)**. The system utilizes **Liquid Neural Networks (LNN)** with **Closed-form Continuous (CfC)** cells and a novel **Fractal Attention** mechanism, supported by a professional **MLOps Infrastructure** (TimescaleDB, MLflow).
+**I.A.R.A. "Trinity Engine" (Protocol Trinity)** is the next evolution of the SACI trading system. It moves beyond a single model to a **Tri-Cameral Architecture** inspired by the human brain (System 1 vs System 2) and MLOps best practices.
 
-Designed for performance on **AMD RDNA2 GPUs (ROCm)** via Docker.
-
----
-
-## ⚡ Key Features
-
-### 🧠 I.A.R.A. v6.1 Architecture
-A hybrid architecture combining the best of Transformers and Continuous-Time RNNs:
-- **Learned Positional Encoding**: Captures precise temporal distances in long sequences (256 steps).
-- **Fractal Attention**: Multi-Head Self-Attention (4 heads) coupled with a Feature Gating mechanism to filter irrelevant market noise.
-- **CfC Backbone**: Symmetric Closed-form Continuous cells that model hidden states as continuous-time dynamic systems, offering superior stability over vanishing/exploding gradients.
-- **Regulated Training**: High dropout (0.5), Gradient Clipping, and Label Smoothing to prevent overconfidence.
-
-### 📊 Advanced Data Engineering
-- **Multi-Asset Support**: Seamlessly trains on EURUSD, GBPUSD, USDJPY, AUDUSD, etc.
-- **Unified Normalization**: `StandardScaler` fitted on pooled data from all assets to preserve relative volatility magnitudes.
-- **15+ Technical Indicators**:
-  - **Momentum**: RSI, Stochastic Oscillator (%K, %D).
-  - **Trend**: MACD, ADX.
-  - **Volatility**: Bollinger Bands (%B, Width), ATR.
-  - **Dynamics**: Price Velocity (First derivative).
-  - **Time**: Cyclical encoding of Hour and Day.
-
-### 🛠️ Production Ready
-- **Dockerized Environment**: Fully encapsulated build with ROCm support for AMD GPUs.
-- **Polars Integration**: Ultra-fast data processing pipeline.
-- **Inference Suit**: Tools for backtesting and signal generation with confidence metrics.
+It features a **Liquid Neural Network (Fast System)** for instant pattern recognition, a **Watchdog Sentinel (Reflex System)** for risk gating, and a **Slow System Interface** (LLM) for strategic oversight.
 
 ---
 
-## 🚀 Quick Start
+## 🧠 The Trinity Architecture
+
+The engine is composed of three distinct but integrated systems:
+
+1.  **Fast System (The Liquid Brain)**:
+    *   **Core**: `ModulatedIARA` (LNN + CfC + Feature Attention).
+    *   **Role**: Processes market data tick-by-tick (milliseconds).
+    *   **Features**: Time-Decay Memory, Fractal Attention, Expert Mixture (Long/Short Specialists).
+
+2.  **Sentinel System (The Watchdog)**:
+    *   **Core**: Rule-based & News-based Gating.
+    *   **Role**: Blocks trade execution during "DEFCON 1" events (e.g., Breaking News, Extreme Volatility).
+    *   **Mechanism**: Physically suppresses neural gradients and output logits when triggered.
+
+3.  **Slow System (The Strategist)**:
+    *   **Core**: LLM Integration (DeepSeek/Llama via `llama-cpp-python`).
+    *   **Role**: Analyzes macroeconomic context and adjusts the Fast System's bias (e.g., "Bearish Regime").
+
+---
+
+## 🖥️ Mission Control v2.0 (Dashboard)
+
+A professional grade Streamlit dashboard (`src/dashboard/`) replaces the old CLI logs.
+
+### 1. 🚀 Training Lab Pro
+*   **Live Monitor**: Real-time plots of Loss, Accuracy, and Learning Rate.
+*   **Forensic Lab (Time Travel)**:
+    *   **Brain MRI**: Visualize hidden state activations (`epoch_*.json`).
+    *   **Decision Architecture**: See exactly *why* the model bought/sold (Long Expert vs Short Expert conviction).
+    *   **Feature Heatmap**: Which indicators (RSI, Price, Volatility) triggered the decision?
+
+### 2. 🎛️ Mission Control (Ops)
+*   **DEFCON Gauge**: Real-time visualization of the Sentinel's threat level.
+*   **Neural Override**: Manual "Kill Switch" to disable the AI during emergencies.
+*   **News Feed**: Live streaming of financial headlines affecting the Sentinel.
+
+---
+
+## ⚡ Quick Start
 
 ### 1. Prerequisites
-- Docker & Docker Compose
-- AMD GPU (configured for ROCm) *OR* NVIDIA GPU (adjust Dockerfile base image) *OR* CPU (slow but functional).
+*   Docker & Docker Compose
+*   AMD GPU (ROCm) *OR* NVIDIA GPU (CUDA)
 
-### 2. Installation
-Clone the repository and build the container:
+### 2. Launch the Trinity Stack
+The entire system (Training, Dashboard, Database, MLflow) runs in a unified Mesh.
+
 ```bash
-git clone https://github.com/your-repo/saci-trader.git
-cd saci-trader
-
-# Build the Saci Brain container
-docker compose build
-```
-
-### 3. Usage
-All commands are run inside the Docker container.
-
-#### Start the MLOps Stack
-```bash
+# Start the MLOps Infrastructure
 docker compose -f docker-compose-mlops.yml up -d
 ```
-*Services started: saci-brain, db (Timescale), mlflow, minio.*
 
-#### A. Data Processing
-Process raw parquet files (Ohlc data) into model-ready features.
-```bash
-docker compose -f docker-compose-mlops.yml exec saci-brain python src/data/processor.py
-```
+### 3. Access the Dashboard
+Open **[http://localhost:8501](http://localhost:8501)** in your browser.
 
-#### B. Training (Standard)
-Train the Agile I.A.R.A. model from scratch.
-```bash
-docker compose -f docker-compose-mlops.yml exec saci-brain python src/train/trainer_liquid.py \
-    --epochs 200 \
-    --batch-size 1024 \
-    --seq-len 256
-```
-*Logs training metrics to http://localhost:5000 (MLflow).*
-*Features: Auto-Rollback, Hard Mining enabled by default.*
-
-#### C. Fine-Tuning (Polishing)
-Refine a trained model with lower learning rate.
-```bash
-# 1. Rollback to best state
-docker compose -f docker-compose-mlops.yml exec saci-brain cp checkpoints/best_model.pth checkpoints/latest.pth
-
-# 2. Resume with low LR
-docker compose -f docker-compose-mlops.yml exec saci-brain python src/train/trainer_liquid.py \
-    --epochs 100 \
-    --batch-size 1024 \
-    --lr 0.0001 \
-    --resume
-```
-
-#### D. Signal Generation (Production)
-Generate live trading signals with Active Learning adaptation.
-```bash
-docker compose -f docker-compose-mlops.yml exec saci-brain python -m src.run_simulation
-```
-*Visualizes results in the Dashboard (http://localhost:8501).*
-*Output: JSON signal with confidence, direction, and regime adjustment.*
-
+*   **Go to "Training Lab"**: Configure hyperparams (Batch Size 1024 supported) and click **"Launch Training"**.
+*   **Watch in Real-Time**: Metrics update live. Use the **Forensic Lab** tab to inspect "Brain Snapshots" from completed epochs.
 
 ---
 
@@ -107,24 +75,29 @@ docker compose -f docker-compose-mlops.yml exec saci-brain python -m src.run_sim
 
 ```
 saci-trader/
-├── checkpoints/       # Saved model weights
-├── config/            # Configuration files
-├── data/
-│   ├── raw/           # Input market data (parquet)
-│   └── processed/     # Feature-engineered data
-├── docker/            # Docker configuration
-├── docs/              # Detailed documentation
 ├── src/
-│   ├── data/          # ETL & Feature Engineering (processor.py)
-│   ├── model/         # I.A.R.A. Neural Network (iara_liquid.py)
-│   └── train/         # Training & Inference loops
-├── requirements.txt   # Python dependencies
-└── docker-compose.yml # Service orchestration
+│   ├── brain/                 # The Trinity Engine Core
+│   │   ├── engine.py          # Orchestrator
+│   │   ├── train_v8.py        # Forensic Training Loop
+│   │   ├── models/            # Neural Architectures (trinity_v8.py, liquid_v8.py)
+│   │   └── agents/            # Sentinel & Slow System Stubs
+│   ├── dashboard/             # Streamlit App (Mission Control)
+│   │   ├── app.py             # Router
+│   │   └── pages/             # Interface Modules (training.py, mission_control.py)
+│   └── data/                  # Feature Engineering
+├── docker-compose-mlops.yml   # Production Orchestration
+├── logs/                      # Telemetry & Snapshots (JSON/CSV)
+└── docs/                      # Documentation
 ```
 
 ---
 
-## 🏗️ Technical Details
-For a deep dive into the Model Architecture, Feature Logic, and Training Strategy, please read the [Architecture Documentation](docs/ARCHITECTURE.md).
+## 🛠️ Forensics & Debugging
+
+If the Dashboard acts up:
+1.  **Clear Snapshots**: `rm logs/snapshots/*.json` (Fixes dimension mismatch from old runs).
+2.  **Restart Container**: `docker restart saci-brain` to force code reload (if hot-reload misses something).
+3.  **Check Logs**: `docker logs -f saci-brain`.
 
 ---
+*Maintained by the SACI Team.*
