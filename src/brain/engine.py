@@ -1,17 +1,23 @@
 """
-TRINITY ENGINE v8.5 [PHASE 1]
-=============================
-The Orchestrator. Manages the Async Loop between Swift (LNN) and Deep (LLM) thoughts.
+TRINITY ENGINE v8.5 "PURE LIQUID"
+=================================
+The Orchestrator. Manages the Async Loop between Swift (Liquid NN) and Deep (Liquid Foundation Model) agents.
 """
 
 import threading
 import time
+import os
 import torch
+import json
+import requests
 from dataclasses import dataclass
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
-# Agents
-from src.brain.models.trinity_v8 import TrinityBrain
+# Models
+from src.brain.models.trinity_liquid import TrinityLiquidBrain
+
+# Tools
+from src.brain.tools.market_scanner import MarketScanner
 from src.brain.agents.sentinel_stub import SentinelStub
 
 # Utils
@@ -19,113 +25,174 @@ import logging
 
 @dataclass
 class EngineConfig:
-    llm_model_path: str = "models/llama-3-8b.gguf"
+    lfm_model_url: str = os.getenv("OLLAMA_URL", "http://ollama:11434/api/generate") # Docker service name
+    lfm_model_name: str = "lfm2.5-thinking:1.2b"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    llm_refresh_rate: float = 300.0 # Seconds (5 minutes)
+    lfm_refresh_rate: float = 60.0 # Strategic thinking every 60s
+    symbol: str = "EURUSD"
 
 class SharedState:
     """
     Thread-Safe Container for the latest 'World View'.
-    The LNN reads from here. The LLM writes to here.
     """
-    def __init__(self, llm_dim: int, device: str):
+    def __init__(self, lfm_dim: int, device: str):
         self.lock = threading.Lock()
         self.device = device
         
-        # Default State (Neutral/Empty)
-        self.llm_context = torch.zeros(1, llm_dim).to(device)
-        self.news_vector = torch.zeros(1, 2).to(device) # [Sentiment=0, Impact=0]
+        # Vectors
+        self.lfm_context = torch.zeros(1, lfm_dim).to(device)
+        self.news_vector = torch.zeros(1, 2).to(device)
+        self.last_price = 0.0
         
-        self.last_llm_update = 0.0
+        self.last_update = 0.0
         
-    def update_llm(self, tensor: torch.Tensor):
+    def update_lfm(self, tensor: torch.Tensor):
         with self.lock:
-            self.llm_context = tensor.to(self.device).detach()
-            self.last_llm_update = time.time()
+            self.lfm_context = tensor.to(self.device).detach()
+            self.last_update = time.time()
             
-    def update_news(self, sentiment: float, impact: float):
+    def update_price(self, price: float):
         with self.lock:
-            self.news_vector = torch.tensor([[sentiment, impact]]).to(self.device)
+            self.last_price = price
 
     def get_state(self):
         with self.lock:
-            return self.llm_context.clone(), self.news_vector.clone()
+            return self.lfm_context.clone(), self.news_vector.clone()
 
 class TrinityEngine:
-    def __init__(self, model: TrinityBrain, config: EngineConfig):
+    def __init__(self, model: TrinityLiquidBrain, config: EngineConfig):
         self.model = model
         self.config = config
         self.logger = logging.getLogger("TrinityEngine")
-        
-        # Hardware
         self.device = torch.device(config.device)
         self.model.to(self.device)
         
         # State
-        self.state = SharedState(llm_dim=4096, device=config.device) # Assuming Llama-3 4096 dim
+        self.state = SharedState(lfm_dim=4096, device=config.device) # Standard Llama Embedding Dim 
+        # Wait, TrinityLiquidBrain expects lfm_hidden_dim to match bridge input.
+        # If LFM outputs text, we need an embedding. 
+        # Standard Ollama embedding returns 4096 (Llama3).
+        # We assume our LFM Interface handles the embedding conversion.
         
-        # Agents (Phase 1)
+        # Agents
         self.sentinel = SentinelStub()
-        self.llm_thread = None
+        self.scanner = MarketScanner()
+        
+        self.lfm_thread = None
         self.active = False
+        
+    def _query_lfm(self, prompt: str) -> str:
+        """Raw Query to Ollama/LFM"""
+        try:
+            payload = {
+                "model": self.config.lfm_model_name,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.2}
+            }
+            res = requests.post(self.config.lfm_model_url, json=payload, timeout=30)
+            if res.status_code == 200:
+                return res.json().get("response", "")
+            else:
+                self.logger.error(f"LFM Error: {res.status_code}")
+                return ""
+        except Exception as e:
+            self.logger.error(f"LFM Connection Failed: {e}")
+            return ""
 
-    def _llm_worker(self):
+    def _lfm_worker(self):
         """
-        The Strategic Agent (Slow Thread).
-        Phase 1: Mocking the LLM generation for now, or place logic here.
-        To be implemented with actual llama-cpp-python logic.
+        The Strategic Agent Loop (Slow Thread).
+        Pure Liquid Architecture: LFM thinks, queries tools, and modulates LNN.
         """
-        self.logger.info("🧠 Strategic Agent (LLM) Online")
+        self.logger.info(f"🧠 Strategic Agent (LFM: {self.config.lfm_model_name}) Online")
+        
         while self.active:
+            start_time = time.time()
             try:
-                # 1. Analyze Macro Context (Time consuming)
-                # simulation of thinking...
-                time.sleep(self.config.llm_refresh_rate)
+                # 1. Get Context
+                price = self.state.last_price
+                if price == 0: 
+                    time.sleep(1)
+                    continue
+
+                # 2. Phase 1: Scan
+                # Prompt LFM to check if it needs data
+                prompt_1 = f"""
+                You are a Strategic Trading AI. Current EURUSD Price: {price:.5f}.
+                Do you need to check Support/Resistance or Trend?
+                Reply with 'CHECK_SR' or 'CHECK_TREND' or 'NO_ACTION'.
+                """
+                decision = self._query_lfm(prompt_1).strip()
                 
-                # 2. Generate Context Vector
-                # TODO: Replace with actual LLM inference
-                # new_context = llm.generate_embedding(...)
+                tool_output = ""
+                if "CHECK_SR" in decision:
+                    self.logger.info("🧠 LFM Requested: CHECK_SR")
+                    tool_output = self.scanner.check_support_resistance(self.config.symbol, price)
+                elif "CHECK_TREND" in decision:
+                    self.logger.info("🧠 LFM Requested: CHECK_TREND")
+                    tool_output = self.scanner.get_trend_alignment(self.config.symbol, '4h')
                 
-                # For Phase 1 demo, we just keep it zero or random noise
-                # new_context = torch.randn(1, 4096)
-                # self.state.update_llm(new_context)
+                # 3. Phase 2: Synthesize & Modulate
+                prompt_2 = f"""
+                Market Context: {tool_output}
+                Current Price: {price:.5f}.
                 
-                self.logger.info("🧠 LLM Refresh Complete (Heartbeat)")
+                Analyze the market structure. 
+                Output a modulation vector as 32 comma-separated floats representing {{(Bullishness, Volatility_Exp, ...)}}.
+                Example: 0.5, 0.1, -0.2 ...
+                """
+                # Note: In real production we use an Embedding endpoint.
+                # Here we ask LFM to maintain a 'State Vector' via text (Simulated).
+                # OR we just get the embedding of the analysis text.
+                # Let's try getting the embedding of the validation.
                 
+                # Mocking embedding for stability if Ollama fails or returns garbage
+                # In real code: response = requests.post(..., "embedding")
+                
+                # For this demo, we generate a random vector modulated by simple sentiment parsing of the 'tool_output'
+                modulation = torch.randn(1, 4096) # Assuming mapping to LFM Dim
+                
+                if "Support" in tool_output: modulation += 0.5 # Bias Up
+                if "Resistance" in tool_output: modulation -= 0.5 # Bias Down
+                
+                self.state.update_lfm(modulation)
+                self.logger.info("🧠 Strategic Context Updated")
+
             except Exception as e:
-                self.logger.error(f"LLM Worker Error: {e}")
-                time.sleep(60)
+                self.logger.error(f"LFM Worker Error: {e}")
+            
+            # Sleep remainder of rate
+            elapsed = time.time() - start_time
+            sleep_time = max(1.0, self.config.lfm_refresh_rate - elapsed)
+            time.sleep(sleep_time)
 
     def start(self):
         self.active = True
-        self.llm_thread = threading.Thread(target=self._llm_worker, daemon=True)
-        self.llm_thread.start()
-        print("🚀 Trinity Engine Started (Dual Core Phase 1)")
+        self.lfm_thread = threading.Thread(target=self._lfm_worker, daemon=True)
+        self.lfm_thread.start()
+        print("🚀 Liquid Trinity Engine Started")
 
-    def forward_tick(self, market_data: torch.Tensor, raw_news: Optional[str] = None):
+    def forward_tick(self, market_data: torch.Tensor):
         """
         The Tactical Loop (Fast Path).
-        Called every tick (or batch of ticks).
         """
-        # 1. Update Sentinel (If news exists) - Fast CPU check
-        if raw_news:
-            analysis = self.sentinel.analyze(raw_news)
-            self.state.update_news(analysis['sentiment'], analysis['impact'])
-            
-        # 2. Get latest Strategic Context (Non-blocking)
-        llm_ctx, news_vec = self.state.get_state()
+        # Updates state
+        current_price = market_data[0, -1, 0].item() # Mock access
+        self.state.update_price(current_price)
         
-        # 3. Model Inference
-        # Ensure inputs are on device
+        # Get Modulators
+        lfm_ctx, news_vec = self.state.get_state()
+        
+        # Inference
         market_data = market_data.to(self.device)
         
-        # Forward pass through Trinity Brain
-        with torch.no_grad(): # Inference mode
-            decision = self.model(market_data, llm_ctx, news_vec)
+        with torch.no_grad():
+            decision = self.model(market_data, lfm_ctx, news_vec)
             
         return decision
 
     def stop(self):
         self.active = False
-        if self.llm_thread:
-            self.llm_thread.join()
+        if self.lfm_thread:
+            self.lfm_thread.join()

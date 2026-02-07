@@ -76,9 +76,11 @@ def render():
                     st.markdown("#### 🏆 Top Models")
                     if lb_data:
                         best = lb_data[0]
-                        st.metric("Best Loss", f"{best['loss']:.4f}", f"Epoch {best['epoch']}")
+                        b_col1, b_col2 = st.columns(2)
+                        b_col1.metric("Best Loss", f"{best['loss']:.4f}", f"Epoch {best['epoch']}")
+                        b_col2.metric("Best AUC", f"{best.get('auc', 0):.4f}", delta_color="normal")
                         
-                        lb_df = pd.DataFrame(lb_data)[["epoch", "loss", "timestamp"]]
+                        lb_df = pd.DataFrame(lb_data)[["epoch", "loss", "accuracy", "auc", "timestamp"]]
                         st.dataframe(lb_df, height=150, hide_index=True)
                     else:
                         st.info("No models ranked yet.")

@@ -18,7 +18,7 @@ st.sidebar.title("🧬 I.A.R.A. v8.5")
 st.sidebar.markdown("---")
 
 # Navigation
-page = st.sidebar.radio("Navigation", ["Mission Control", "Training Lab"])
+page = st.sidebar.radio("Navigation", ["Mission Control", "Training Lab", "Model Manager", "Simulation Lab"])
 
 st.sidebar.markdown("---")
 st.sidebar.info(
@@ -39,3 +39,18 @@ elif page == "Training Lab":
     from src.dashboard.pages import training
     importlib.reload(training)
     training.render()
+elif page == "Model Manager":
+    from src.dashboard.pages import models
+    importlib.reload(models)
+    models.render()
+elif page == "Simulation Lab":
+    from src.dashboard.pages import simulation
+    # Mock for now if file doesn't exist yet, but we will create it next.
+    # To avoid crashing before creation:
+    try:
+        importlib.reload(simulation)
+        simulation.render()
+    except ImportError:
+        st.warning("Simulation Lab module not found yet. Please wait for installation.")
+    except Exception as e:
+         st.error(f"Sim Lab Error: {e}")

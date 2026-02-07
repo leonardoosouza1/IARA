@@ -38,3 +38,23 @@ services:
     
     stdin_open: true
     tty: true
+
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: ollama_service
+    restart: always
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama_data:/root/.ollama
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=10.3.0
+    # Command to serve.
+    # To pull model automatically, one might need a custom entrypoint, 
+    # but standard image entrypoint is 'serve'.
+

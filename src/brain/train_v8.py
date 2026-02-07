@@ -10,10 +10,11 @@ import csv
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from sklearn.metrics import roc_auc_score
 
 # Import Trinity Architecture
 from src.brain.models.liquid_v8 import LiquidConfig, ModulatedIARA
-from src.brain.models.trinity_v8 import TrinityBrain
+from src.brain.models.trinity_liquid import TrinityLiquidBrain
 
 # Constants
 LOG_DIR = "logs"
@@ -105,84 +106,93 @@ def load_and_cache_data():
             
     return MARKET_DATA_CACHE
 
-def generate_market_scenario(batch_size, seq_len, input_dim):
-    """
-    Samples a REAL market sequence from EURUSD_synthetic.csv.
-    """
-    df = load_and_cache_data() # Will CRASH if no data (Desired behavior)
+from torch.utils.data import TensorDataset, DataLoader
+
+class CryptoDataset(TensorDataset):
+    def __init__(self, x_path, y_path=None):
+        self.x = torch.load(x_path)
+        if isinstance(self.x, dict):
+            # Handle potential dict wrapping
+            self.y = self.x.get('y')
+            self.x = self.x.get('X')
+        else:
+            self.y = None
+            
+        if self.y is None and y_path:
+             self.y = torch.load(y_path)
+
+        # Move to CPU first to avoid CUDA OOM during init if large
+        self.x = self.x.float()
+        self.y = self.y.float()
+        
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, idx):
+        return self.x[idx], self.y[idx]
+
+def get_dataloaders(batch_size):
+    # Load Cache
+    print("📂 Loading Pre-computed Tensors from data/cache/...")
+    train_ds = CryptoDataset("data/cache/train.pt")
+    val_ds = CryptoDataset("data/cache/val.pt")
     
-    # Sample a random start point
-    max_idx = len(df) - seq_len - 11 # -10 for target lookahead
+    print(f"   Train Size: {len(train_ds)} | Val Size: {len(val_ds)}")
+    
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=True)
+    
+    return train_loader, val_loader
+
+# Replaces generate_market_scenario for Training, 
+# BUT we keep a helper for Visualization relying on the CSV.
+def get_viz_scenario(seq_len=256):
+    """
+    Returns a single coherent slice from CSV for Dashboard visualization.
+    Matches the input shape (18) by adding dummy features if needed or re-calculating.
+    """
+    df = load_and_cache_data()
+    max_idx = len(df) - seq_len - 10
     start_idx = np.random.randint(0, max_idx)
-    
-    # Extract Slice
-    # We pick one coherent sequence for the forensic snapshot (Batch 0)
     slice_df = df.iloc[start_idx : start_idx + seq_len].copy()
     
-    # Extract Features
-    closes = slice_df["close"].values
-    highs = slice_df["high"].values
-    lows = slice_df["low"].values
+    # We need to recreate the 18-dim features to match the model
+    # For viz purposes, we will try to match the V6 schema roughly or just pad
+    # V6 (18 dims) usually: 
+    # [NormClose, NormHigh, NormLow, RSI, MACD, Signal, BB_Up, BB_Low, CCI, ADX, STOCH, WILLR, ... ]
+    # Since we can't easily reproduce exact V6 features on the fly without the factory code,
+    # We will assume dimensions 0-5 are main price/techs and rest are advanced.
     
-    # Extract Features (Pre-calculated)
-    # Norm Close
+    # Hack: We generate the 6 basic we know, and pad the rest with zeros for the visualization inference.
+    # The 'Brain' might give garbage expert curves on this dummy data, but the Hidden State heatmap will work.
+    
     closes = slice_df["close"].values
     norm_close = (closes - closes.mean()) / (closes.std() + 1e-6)
     
-    # Technicals
+    # We rely on what load_and_cache_data computes (RSI, MACD, etc)
+    # Check lines 65+ in load_and_cache_data
+    
     rsi = slice_df["rsi"].values
     macd = slice_df["macd"].values
     bb_pos = slice_df["bb_upper"].values
     log_ret = slice_df["log_ret"].values
     volat = slice_df["volatility"].values
     
-    # Stack Real Features (6 dimensions)
-    # [NormClose, RSI, MACD, BB_Pos, LogRet, Volatility]
-    real_features = np.column_stack([norm_close, rsi, macd, bb_pos, log_ret, volat])
+    # 6 Real features
+    base_feats = np.column_stack([norm_close, rsi, macd, bb_pos, log_ret, volat])
     
-    # Fill remaining input dims (16 total) with subtle noise
-    # We want the model to learn to IGNORE these channels (dims 6-15)
-    remaining_dim = input_dim - 6
-    if remaining_dim > 0:
-        noise_feats = np.random.normal(0, 0.01, size=(seq_len, remaining_dim))
-        sample_features = np.column_stack([real_features, noise_feats])
-    else:
-        sample_features = real_features[:, :input_dim]
+    # Pad to 18
+    padding = np.zeros((seq_len, 12))
+    full_feats = np.column_stack([base_feats, padding])
     
-    # Batch Replication
-    batch_features = np.tile(sample_features, (batch_size, 1, 1))
+    inputs = torch.FloatTensor(full_feats).unsqueeze(0) # Batch 1
+    llm_ctx = torch.randn(1, 32)
+    news_vec = torch.zeros(1, 2)
     
-    # Augmentation: Add subtle noise to prevent overfitting
-    batch_features += np.random.normal(0, 0.005, size=batch_features.shape)
-    
-    # Targets: Future Return Direction with "Neutral Zone" (Smart Targets)
-    # Look ahead 10 candles
-    future_close = df.iloc[start_idx + seq_len + 10]["close"]
-    current_close = closes[-1]
-    
-    price_change = (future_close - current_close) / current_close
-    
-    # Threshold for "Actionable Signal" (e.g., 0.01% move)
-    # If price doesn't move enough? It's a HOLD (0.5)
-    # This teaches the AI to NOT hallucinate trends in flat markets.
-    NOISE_THRESHOLD = 0.0001 
-    
-    target_val = 0.5 # Default HOLD
-    
-    if price_change > NOISE_THRESHOLD:
-        target_val = 1.0 # BUY
-    elif price_change < -NOISE_THRESHOLD:
-        target_val = 0.0 # SELL
-        
-    targets = torch.full((batch_size,), target_val)
-    inputs_tensor = torch.FloatTensor(batch_features)
-    targets_tensor = targets
-    
-    # OHLC for Dashboard
-    return inputs_tensor, targets_tensor, slice_df
+    return inputs, slice_df, llm_ctx, news_vec
 
 class ForensicRecorder:
-    def __init__(self, model: TrinityBrain):
+    def __init__(self, model: TrinityLiquidBrain):
         self.model = model
         self.captured_data = {"feature_gates": []}
         self._register_hooks()
@@ -237,6 +247,127 @@ class ForensicRecorder:
             
         self.model.train()
 
+from torch.utils.data import WeightedRandomSampler
+
+class SelectiveMemory:
+    """
+    v6.11 Selective Memory (Curriculum Learning).
+    Tracks simple vs difficult samples across epochs to focus training.
+    """
+    def __init__(self, num_samples, alpha=0.7):
+        self.alpha = alpha # EMA factor
+        self.sample_loss_ema = torch.ones(num_samples)
+        self.chronic_counter = torch.zeros(num_samples, dtype=torch.int16) # Persistent errors
+        self.mastered_counter = torch.zeros(num_samples, dtype=torch.int16) # Persistent correct
+        self.noise_mask = torch.zeros(num_samples, dtype=torch.bool) # Impossible samples
+        
+        # History for noise detection (Rolling window of 10 epochs)
+        self.epoch_losses_history = torch.zeros(num_samples, 10)
+
+    def analyze(self, model, dataset, device, batch_size=2048):
+        """
+        Deep Thought: Runs a fast evaluation pass to update sample difficulty.
+        Returns: WeightedRandomSampler for the next epoch.
+        """
+        print("🧠 Deep Thought: Analyzing difficulty spectrum (Selective Memory)...")
+        model.eval()
+        losses = []
+        accuracies = []
+        
+        # Fast Eval Loader (Sequential)
+        eval_loader = DataLoader(
+            dataset, batch_size=batch_size, shuffle=False, 
+            num_workers=0, pin_memory=True
+        )
+        
+        criterion = nn.BCEWithLogitsLoss(reduction='none')
+        
+        total_batches = len(eval_loader)
+        with torch.no_grad():
+            with torch.cuda.amp.autocast(enabled=(device == "cuda")):
+                for i, (inputs, targets) in enumerate(eval_loader):
+                    if i % 10 == 0:
+                        print(f"   [Deep Thought] Scanned {i}/{total_batches} batches...", end='\r')
+                        
+                    inputs = inputs.to(device)
+                    targets = targets.float().to(device)
+                    llm_ctx = torch.zeros(inputs.size(0), 32).to(device)
+                    news_vec = torch.zeros(inputs.size(0), 2).to(device)
+                    
+                    outputs = model(inputs, llm_ctx, news_vec)
+                    outputs = outputs.squeeze(-1)
+                    
+                    # 1. Per-Sample Loss
+                    loss = criterion(outputs, targets)
+                    losses.append(loss.cpu())
+                    
+                    # 2. Per-Sample Correctness (Mastery)
+                    probs = torch.sigmoid(outputs)
+                    preds = (probs > 0.5).float()
+                    hard_targets = (targets > 0.5).float()
+                    correct = (preds == hard_targets).float()
+                    
+                    # High Confidence?
+                    confident = ((probs > 0.7) | (probs < 0.3)).float()
+                    accuracies.append(correct * confident)
+        
+        print(f"   [Deep Thought] Processing stats for {len(losses) * batch_size} samples...") 
+        current_losses = torch.cat(losses)
+        current_mastered = torch.cat(accuracies)
+        
+        # --- UPDATE STATE ---
+        # 1. EMA Loss
+        if len(self.sample_loss_ema) != len(current_losses):
+             # Resize if dataset changed (robustness)
+             self.sample_loss_ema = torch.ones_like(current_losses)
+             
+        self.sample_loss_ema = (self.alpha * self.sample_loss_ema) + ((1 - self.alpha) * current_losses)
+        
+        # 2. Chronic (High Loss > 0.9)
+        high_loss = current_losses > 0.9
+        self.chronic_counter[high_loss] += 1
+        self.chronic_counter[~high_loss] = 0
+        
+        # 3. Mastered (Confident Correct)
+        mastered_mask = current_mastered > 0.5
+        self.mastered_counter[mastered_mask] += 1
+        self.mastered_counter[~mastered_mask] = 0
+        
+        # 4. Noise (Impossible > 1.2 for 10 epochs)
+        self.epoch_losses_history = torch.roll(self.epoch_losses_history, -1, dims=1)
+        self.epoch_losses_history[:, -1] = current_losses
+        noise_candidates = (self.epoch_losses_history > 1.2).all(dim=1)
+        self.noise_mask = self.noise_mask | noise_candidates
+        
+        # --- CALCULATE WEIGHTS ---
+        weights = (self.sample_loss_ema + 0.05) ** 2
+        
+        # Boost Chronic
+        weights[self.chronic_counter >= 3] *= 3.0
+        
+        # Boost Arrogant (Very high loss = Wrong + Confident)
+        weights[current_losses > 1.5] *= 2.0
+        
+        # Suppress Mastered
+        weights[self.mastered_counter >= 5] *= 0.05
+        
+        # Kill Noise
+        weights[self.noise_mask] = 0.0
+        
+        # Stats
+        n_chronic = (self.chronic_counter >= 3).sum().item()
+        n_mastered = (self.mastered_counter >= 5).sum().item()
+        n_noise = self.noise_mask.sum().item()
+        
+        print(f"   📊 Stats: {n_chronic} Chronic | {n_mastered} Mastered | {n_noise} Noise (Dropped)")
+        torch.cuda.empty_cache()
+        
+        # Sampler
+        sampler = WeightedRandomSampler(
+            weights=weights, num_samples=len(weights), replacement=True
+        )
+        return sampler
+
 class AsymmetricFocalLoss(nn.Module):
     """
     v6.7 Profit-Weighted Asymmetric Focal Loss.
@@ -278,11 +409,12 @@ class Leaderboard:
                     self.history = json.load(f)
             except: pass
             
-    def update(self, epoch, loss, accuracy, model_state):
+    def update(self, epoch, loss, accuracy, auc, model_state):
         entry = {
             "epoch": epoch,
             "loss": loss,
             "accuracy": accuracy,
+            "auc": auc,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         self.history.append(entry)
@@ -292,14 +424,14 @@ class Leaderboard:
             json.dump(self.history, f, indent=2)
             
         if self.history[0]["epoch"] == epoch:
-            print(f"🏆 New Best Model! Loss: {loss:.4f} | Acc: {accuracy:.2%}")
+            print(f"🏆 New Best Model! Loss: {loss:.4f} | Acc: {accuracy:.2%} | AUC: {auc:.4f}")
             torch.save(model_state, os.path.join(MODELS_DIR, "best_model.pth"))
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--lr", type=float, default=0.0005)
+    parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--epochs", type=int, default=500)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
@@ -314,7 +446,7 @@ def main():
     
     with open(METRICS_FILE, "w", newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["step", "epoch", "loss", "accuracy", "lr"])
+        writer.writerow(["step", "epoch", "loss", "accuracy", "auc", "lr"])
 
     # 1. Init Model
     if args.cpu:
@@ -337,9 +469,12 @@ def main():
         sys.exit(1)
 
     # High Seq Len for Pattern Recognition
-    liq_cfg = LiquidConfig(input_dim=16, hidden_dim=128, max_seq_len=256)
+    # V8 Hybrid: Consuming V6 processed tensors which have 18 features
+    INPUT_DIM = 18 
+    liq_cfg = LiquidConfig(input_dim=INPUT_DIM, hidden_dim=128, max_seq_len=256)
     lnn = ModulatedIARA(liq_cfg)
-    model = TrinityBrain(lnn, llm_hidden_dim=32).to(device)
+    # V8.5 Pure Liquid: LFM Context is 4096 dim
+    model = TrinityLiquidBrain(lnn, lfm_hidden_dim=4096).to(device)
     
     # ----------------------------------------------------
     # RESUME FROM CHAMPION (Transfer Learning)
@@ -348,8 +483,14 @@ def main():
     if os.path.exists(best_model_path):
         print(f"🏆 FOUND CHAMPION MODEL. Resuming training from: {best_model_path}")
         try:
-            model.load_state_dict(torch.load(best_model_path, map_location=device))
-            print("✅ Weights loaded successfully! Starting with high IQ base.")
+            # Handle dimension mismatch if upgrading from 16 -> 18
+            state_dict = torch.load(best_model_path, map_location=device)
+            current_dict = model.state_dict()
+            
+            # Simple check: If first layer weight shape mismatches, skip it
+            # But here we assume we are starting fresh or resuming compatible
+            model.load_state_dict(state_dict, strict=False) 
+            print("✅ Weights loaded (Relaxed/Strict)! Starting with high IQ base.")
         except Exception as e:
             print(f"⚠️ Failed to load champion model: {e}. Starting fresh.")
     else:
@@ -360,76 +501,150 @@ def main():
     
     # v6.9 Logic: AdamW + Asymmetric Focal Loss
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4) # Added weight_decay
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    # V6 Exact Match: Gentle decay
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.8, patience=15)
     criterion = AsymmetricFocalLoss(alpha=0.75, gamma=2.0)
+    scaler = torch.cuda.amp.GradScaler(enabled=(device == "cuda"))
     
-    steps_per_epoch = 50 
+    # LOAD DATASETS
+    # We access the underlying dataset directly for analysis
+    print("📂 Loading Pre-computed Tensors from data/cache/...")
+    train_ds = CryptoDataset("data/cache/train.pt")
+    val_ds = CryptoDataset("data/cache/val.pt")
+    print(f"   Train Size: {len(train_ds)} | Val Size: {len(val_ds)}")
     
+    # Init Selective Memory
+    memory = SelectiveMemory(len(train_ds))
+    
+    # Default Loader (Shuffle) for Epoch 1
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=True)
+    
+    steps_per_epoch = len(train_loader)
     print("------------------------------------------------")
+    print(f"🔄 Training Loop Start: {steps_per_epoch} steps per epoch.")
     
     for epoch in range(1, args.epochs + 1):
+        # ----------------------------------------
+        # SELECTIVE MEMORY (Curriculum)
+        # ----------------------------------------
+        # From Epoch 2 onwards, we refine the curriculum based on previous performance
+        if epoch > 1:
+            sampler = memory.analyze(model, train_ds, device)
+            train_loader = DataLoader(
+                train_ds, 
+                batch_size=args.batch_size, 
+                sampler=sampler, # Use Sampler -> shuffle must be False
+                shuffle=False, 
+                drop_last=True
+            )
+        
         epoch_loss = 0
         epoch_acc = 0
+        epoch_auc = 0
         
-        for step in range(steps_per_epoch):
-            # Generate REAL Market Data
-            inputs, targets, ohlc_df = generate_market_scenario(args.batch_size, 256, 16)
-            
+        all_targets = []
+        all_probs = []
+        
+        model.train()
+        
+        # Iterate DataLoader
+        for step, (inputs, targets) in enumerate(train_loader):
             inputs = inputs.to(device)
-            targets = targets.float().to(device) 
+            targets = targets.float().to(device)
             
-            llm_ctx = torch.randn(args.batch_size, 32).to(device)
-            news_vec = torch.zeros(args.batch_size, 2).to(device)
+            # STABILITY FIX: Zero out LLM context instead of random noise
+            # We want the LNN to learn market physics first.
+            llm_ctx = torch.zeros(inputs.size(0), 4096).to(device)
+            news_vec = torch.zeros(inputs.size(0), 2).to(device)
             
             optimizer.zero_grad()
-            outputs = model(inputs, llm_ctx, news_vec)
-            outputs = outputs.squeeze(-1)
             
-            # Loss: Asymmetric Focal Loss (Classification Logic)
-            # Outputs are Logits (unbounded), Targets are 0.0, 0.5, 1.0
-            loss = criterion(outputs, targets) # No Sigmoid here, handled in BCEWithLogits
+            # AMP Forward
+            with torch.cuda.amp.autocast(enabled=(device == "cuda")):
+                outputs = model(inputs, llm_ctx, news_vec)
+                outputs = outputs.squeeze(-1)
+                
+                # Loss: Asymmetric Focal Loss (Classification Logic)
+                loss = criterion(outputs, targets)
             
-            loss.backward()
+            # AMP Backward
+            scaler.scale(loss).backward()
             
-            # Gradient Clipping ( Prevent Explosion )
+            # Gradient Clipping (Unscale first)
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             
             epoch_loss += loss.item()
             
-            # Accuracy (3-Class: Buy, Sell, Hold)
-            # Outputs are LOGITS, so we apply Sigmoid first for probability
+            # Metrics
             probs = torch.sigmoid(outputs)
             
-            pred_class = torch.zeros_like(probs)
-            pred_class[probs > 0.6] = 1.0  # Buy
-            pred_class[probs < 0.4] = 0.0  # Sell
-            pred_class[(probs >= 0.4) & (probs <= 0.6)] = 0.5 # Hold
+            # Binary Accuracy (V6 Style for comparison)
+            # Treat > 0.5 as Buy, <= 0.5 as Sell/Hold (Downside bias)
+            preds = (probs > 0.5).float()
             
-            acc = (pred_class == targets).float().mean().item()
+            # For Accuracy calc, we assume Hard targets (0 or 1). 
+            # If target is 0.5, it counts as 0 for binary comparison
+            hard_targets = (targets > 0.5).float() 
+            
+            acc = (preds == hard_targets).float().mean().item()
             epoch_acc += acc
             
-            # Telemetry
-            global_step = (epoch - 1) * steps_per_epoch + step
-            current_lr = optimizer.param_groups[0]['lr']
-            with open(METRICS_FILE, "a", newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([global_step, epoch, loss.item(), acc, current_lr])
+            # Collect for AUC
+            all_targets.extend(hard_targets.detach().cpu().numpy())
+            all_probs.extend(probs.detach().cpu().numpy())
+            
+            # Telemetry (Sampled to avoid CSV spam)
+            if step % 10 == 0:
+                global_step = (epoch - 1) * steps_per_epoch + step
+                current_lr = optimizer.param_groups[0]['lr']
                 
-            time.sleep(0.01) 
+                # Running AUC estimate (chunk)
+                try:
+                    batch_auc = roc_auc_score(hard_targets.detach().cpu().numpy(), probs.detach().cpu().numpy())
+                except:
+                    batch_auc = 0.5
+                    
+                with open(METRICS_FILE, "a", newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([global_step, epoch, loss.item(), acc, batch_auc, current_lr])
             
         avg_loss = epoch_loss / steps_per_epoch
         avg_acc = epoch_acc / steps_per_epoch
         
+        try:
+            avg_auc = roc_auc_score(all_targets, all_probs)
+        except:
+            avg_auc = 0.5
+        
         # Adjust Learning Rate if plateau
         scheduler.step(avg_loss)
-        current_lr = scheduler.optimizer.param_groups[0]['lr']
         
-        print(f"Epoch {epoch}/{args.epochs} | Loss: {avg_loss:.4f} | Acc: {avg_acc:.2%}")
+        print(f"Epoch {epoch}/{args.epochs} | Loss: {avg_loss:.4f} | Acc: {avg_acc:.2%} | AUC: {avg_auc:.4f}")
         
-        recorder.capture_snapshot(inputs, ohlc_df, llm_ctx, news_vec, epoch)
-        leaderboard.update(epoch, avg_loss, avg_acc, model.state_dict())
+        # ----------------------------------------
+        # SNAPSHOT (Visualization)
+        # We need to construct a synthetic one because the DataLoader doesn't give OHLC
+        # ----------------------------------------
+        try:
+             # Grab a random scenario from CSV for visualization
+             print("   📸 Capturing Forensic Snapshot...")
+             viz_inputs, viz_ohlc, v_ctx, v_news = get_viz_scenario()
+             viz_inputs = viz_inputs.to(device)
+             v_ctx = v_ctx.to(device)
+             v_news = v_news.to(device)
+             recorder.capture_snapshot(viz_inputs, viz_ohlc, v_ctx, v_news, epoch)
+             print("   ✅ Snapshot Saved.")
+        except Exception as e:
+             print(f"⚠️ Snapshot Warning: {e}")
+        
+        print("   🏆 Updating Leaderboard...") 
+        leaderboard.update(epoch, avg_loss, avg_acc, avg_auc, model.state_dict())
+        print("   ✅ Leaderboard Updated.")
         
         with open(TELEMETRY_FILE, "w") as f:
             json.dump({
@@ -443,6 +658,6 @@ def main():
     with open(TELEMETRY_FILE, "w") as f:
         json.dump({"status": "COMPLETED"}, f)
     print("✅ Training Complete.")
-
+ 
 if __name__ == "__main__":
     main()

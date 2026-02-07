@@ -1,49 +1,22 @@
-# Data Engineering
+# Core
+torch>=2.2.0
+numpy
+pandas
 polars
-pyarrow
 
-# Technical Analysis (requer TA-Lib C instalado)
-ta-lib
+# Database
+psycopg2-binary
+sqlalchemy
+asyncpg
 
-# Data Source
-yfinance
+# Strategic Agent (LLM/LFM)
+requests # For Ollama API
+# llama-cpp-python # Uncomment if running GGUF directly via python bindings
 
-# AI Core
-einops
-scikit-learn
-# PyTorch ROCm (Install via: pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2)
-torch
-torchvision
-torchaudio
-
-
-# Utilities
-tqdm
-PyYAML
-
-# GPU Kernels (ROCm Compatible)
-triton>=2.1.0
-
-# LLM & NLP (Trinity Engine)
-transformers
-# Install with: CMAKE_ARGS="-DLLAMA_HIPBLAS=on" pip install llama-cpp-python
-llama-cpp-python
-chardet
-
-# Visualization
-matplotlib
-seaborn
-
-# Parallel Processing
-joblib
-yfinance
-
-# Interactive Dashboard
+# Dashboard
 streamlit
 plotly
 
-# MLOps Stack (V7)
-psycopg2-binary
-sqlalchemy
-mlflow
-boto3
+# Utils
+python-dotenv
+einops
