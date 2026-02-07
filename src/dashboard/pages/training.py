@@ -190,8 +190,12 @@ def render():
                 selected_snap = st.selectbox("Select Epoch Snapshot", snapshots, index=len(snapshots)-1)
                 
                 # Load Data
-                with open(os.path.join(SNAPSHOT_DIR, selected_snap), "r") as f:
-                    data = json.load(f)
+                try:
+                    with open(os.path.join(SNAPSHOT_DIR, selected_snap), "r") as f:
+                        data = json.load(f)
+                except json.JSONDecodeError:
+                    st.error(f"Snapshot {selected_snap} is corrupted.")
+                    return
                     
                 # Data Containers
                 # expert_conviction: {long: [], short: []}

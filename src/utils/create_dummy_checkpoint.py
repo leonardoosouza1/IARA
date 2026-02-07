@@ -4,7 +4,7 @@ import torch
 from pathlib import Path
 
 # Add src to path
-sys.path.append("/app")
+# sys.path.append("/app") - Removed, rely on PYTHONPATH
 
 from src.model.iara_liquid import IARA, LiquidConfig
 from src.train.trainer_liquid import TrainerConfig

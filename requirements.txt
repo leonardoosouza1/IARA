@@ -1,5 +1,4 @@
 # Core
-torch>=2.2.0
 numpy
 pandas
 polars
@@ -20,3 +19,5 @@ plotly
 # Utils
 python-dotenv
 einops
+scikit-learn
+TA-Lib

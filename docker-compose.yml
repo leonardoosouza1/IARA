@@ -2,7 +2,7 @@ services:
   saci-brain:
     build:
       context: .
-      dockerfile: docker/Dockerfile
+      dockerfile: Dockerfile
     container_name: saci_trader_bot
     restart: unless-stopped
     

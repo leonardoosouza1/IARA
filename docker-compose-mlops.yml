@@ -1,14 +1,13 @@
 
-
 services:
   # 1. Cérebro de Dados (TimescaleDB + pgvector)
   db:
     image: timescale/timescaledb:latest-pg14
     container_name: saci-brain-db
     environment:
-      - POSTGRES_USER=saci
-      - POSTGRES_PASSWORD=saci_secret
-      - POSTGRES_DB=saci_core
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
     ports:
       - "5432:5432"
     volumes:
@@ -17,7 +16,7 @@ services:
       - saci-net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U saci"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -29,16 +28,16 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - MLFLOW_BACKEND_STORE_URI=postgresql://saci:saci_secret@db:5432/mlflow
-      - MLFLOW_ARTIFACT_ROOT=s3://mlflow/
-      - AWS_ACCESS_KEY_ID=minio
-      - AWS_SECRET_ACCESS_KEY=minio123
-      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - MLFLOW_BACKEND_STORE_URI=${MLFLOW_BACKEND_STORE_URI}
+      - MLFLOW_ARTIFACT_ROOT=${MLFLOW_ARTIFACT_ROOT}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - MLFLOW_S3_ENDPOINT_URL=${MINIO_ENDPOINT}
       - MLFLOW_GUNICORN_OPTS=--forwarded-allow-ips '*'
     command: >
       mlflow server
-      --backend-store-uri postgresql://saci:saci_secret@db:5432/mlflow
-      --default-artifact-root s3://mlflow/
+      --backend-store-uri ${MLFLOW_BACKEND_STORE_URI}
+      --default-artifact-root ${MLFLOW_ARTIFACT_ROOT}
       --host 0.0.0.0
       --gunicorn-opts "--forwarded-allow-ips '*'"
     depends_on:
@@ -57,8 +56,8 @@ services:
       - "9000:9000"
       - "9002:9001"
     environment:
-      - MINIO_ROOT_USER=minio
-      - MINIO_ROOT_PASSWORD=minio123
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
     command: server /data --console-address ":9001"
     volumes:
       - saci_minio_data:/data
@@ -76,6 +75,9 @@ services:
 
   # 5. O Cérebro (Trainer/Inference)
   saci-brain:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: saci-trader-saci-brain:latest
     container_name: saci-brain
     volumes:
@@ -83,7 +85,7 @@ services:
     ports:
       - "8501:8501"
     environment:
-      - DB_URI=postgresql://saci:saci_secret@db:5432/saci_core
+      - DB_URI=${DB_URI}
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - HSA_OVERRIDE_GFX_VERSION=10.3.0
       - OLLAMA_URL=http://ollama:11434/api/generate
@@ -96,7 +98,7 @@ services:
     networks:
       - saci-net
     command: >
-      /bin/bash -c "CMAKE_ARGS='-DLLAMA_HIPBLAS=on' pip install -r requirements.txt && streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0"
+      streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
     
     # GPU & Security (ROCm Config)
     shm_size: '8gb'

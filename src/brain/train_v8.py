@@ -186,7 +186,7 @@ def get_viz_scenario(seq_len=256):
     full_feats = np.column_stack([base_feats, padding])
     
     inputs = torch.FloatTensor(full_feats).unsqueeze(0) # Batch 1
-    llm_ctx = torch.randn(1, 32)
+    llm_ctx = torch.randn(1, 4096)
     news_vec = torch.zeros(1, 2)
     
     return inputs, slice_df, llm_ctx, news_vec
@@ -291,7 +291,7 @@ class SelectiveMemory:
                         
                     inputs = inputs.to(device)
                     targets = targets.float().to(device)
-                    llm_ctx = torch.zeros(inputs.size(0), 32).to(device)
+                    llm_ctx = torch.zeros(inputs.size(0), 4096).to(device)
                     news_vec = torch.zeros(inputs.size(0), 2).to(device)
                     
                     outputs = model(inputs, llm_ctx, news_vec)
@@ -325,12 +325,12 @@ class SelectiveMemory:
         
         # 2. Chronic (High Loss > 0.9)
         high_loss = current_losses > 0.9
-        self.chronic_counter[high_loss] += 1
+        self.chronic_counter[high_loss.cpu()] += 1
         self.chronic_counter[~high_loss] = 0
         
         # 3. Mastered (Confident Correct)
         mastered_mask = current_mastered > 0.5
-        self.mastered_counter[mastered_mask] += 1
+        self.mastered_counter[mastered_mask.cpu()] += 1
         self.mastered_counter[~mastered_mask] = 0
         
         # 4. Noise (Impossible > 1.2 for 10 epochs)
@@ -429,10 +429,12 @@ class Leaderboard:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--lr", type=float, default=0.001)
+    # TUNING: Lower LR for stability (Recurrent models explode easily)
+    parser.add_argument("--lr", type=float, default=0.0005) 
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch_size", type=int, default=1024)
-    parser.add_argument("--cpu", action="store_true")
+    # FORCE CPU by default to avoid ROCm hang
+    parser.add_argument("--cpu", action="store_true", default=False) 
     args = parser.parse_args()
 
     # CRITICAL: Clean old snapshots
@@ -503,7 +505,9 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4) # Added weight_decay
     # V6 Exact Match: Gentle decay
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.8, patience=15)
-    criterion = AsymmetricFocalLoss(alpha=0.75, gamma=2.0)
+    
+    # TUNING: Switching to standard BCE to debug convergence
+    criterion = nn.BCEWithLogitsLoss() # AsymmetricFocalLoss(alpha=0.75, gamma=1.0)
     scaler = torch.cuda.amp.GradScaler(enabled=(device == "cuda"))
     
     # LOAD DATASETS

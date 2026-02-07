@@ -4,7 +4,7 @@ from datetime import datetime
 import torch
 
 # Add src to path
-sys.path.append("/app")
+# sys.path.append("/app") - Removed, rely on PYTHONPATH
 
 from src.analysis.active_learning import ActiveLearner
 from src.trading.signal_generator import SignalEngine
