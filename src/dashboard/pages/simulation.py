@@ -184,7 +184,7 @@ def render():
                          labels=dict(x="Time Window (Memory)", y="Neuron ID")
                      )
                      fig_n.update_layout(height=400, margin=dict(l=0,r=0,t=0,b=0))
-                     st.plotly_chart(fig_n, use_container_width=True, key=f"neuro_{state['step']}")
+                     st.plotly_chart(fig_n, width="stretch", key=f"neuro_{state['step']}")
                 
                 # Biases
                 st.progress(state.get("prob", 0.5), text=f"Buy Probability: {state.get('prob',0)*100:.1f}%")
@@ -208,7 +208,7 @@ def render():
                     title = {'text': "EURUSD"},
                     gauge = {'axis': {'range': [state["price"]*0.99, state["price"]*1.01]}}
                 ))
-                st.plotly_chart(fig_p, use_container_width=True, key=f"gauge_{state['step']}")
+                st.plotly_chart(fig_p, width="stretch", key=f"gauge_{state['step']}")
 
         time.sleep(1.0 / speed) 
         # Note: In Streamlit, this while loop with sleep blocks interaction. 

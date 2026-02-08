@@ -84,7 +84,7 @@ def render():
                     'thickness': 0.75,
                     'value': 90}}))
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         
         st.markdown("### Manual Override")
         

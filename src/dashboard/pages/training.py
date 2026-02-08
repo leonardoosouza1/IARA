@@ -124,12 +124,12 @@ def render():
                     # Loss Chart
                     fig_loss = px.line(df, x="step", y="loss", title="Loss Convergence", template="plotly_dark")
                     fig_loss.update_traces(line_color='#FF4B4B')
-                    col_m1.plotly_chart(fig_loss, key="loss_chart", use_container_width=True)
+                    col_m1.plotly_chart(fig_loss, key="loss_chart", width="stretch")
                     
                     # Accuracy Chart
                     fig_acc = px.line(df, x="step", y="accuracy", title="Validation Accuracy", template="plotly_dark")
                     fig_acc.update_traces(line_color='#00CC96')
-                    col_m2.plotly_chart(fig_acc, key="acc_chart", use_container_width=True)
+                    col_m2.plotly_chart(fig_acc, key="acc_chart", width="stretch")
                     
                     with st.expander("Show Raw Data"):
                         st.dataframe(df.tail(10))
@@ -307,14 +307,14 @@ def render():
                             height=400,
                             margin=dict(l=0, r=0, t=30, b=0)
                         )
-                        st.plotly_chart(fig, key="cortex_chart", use_container_width=True)
+                        st.plotly_chart(fig, key="cortex_chart", width="stretch")
                         
                     else:
                         st.warning("⚠️ Legacy Snapshot: No OHLC Data found. Run new training to see Visual Cortex.")
                         # Fallback to simple line
                         fig = px.line(y=inputs, title="Normalized Input (Legacy)")
                         fig.add_vline(x=selected_tick, line_color="yellow")
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
 
                 with col_cortex_2:
                     st.subheader("🧠 Synaptic Map")
@@ -335,7 +335,7 @@ def render():
                         height=200,
                         margin=dict(l=0, r=0, t=30, b=0)
                     )
-                    st.plotly_chart(expert_fig, key="expert_conviction_bar", use_container_width=True)
+                    st.plotly_chart(expert_fig, key="expert_conviction_bar", width="stretch")
                     
                     
                     # 2. Feature Gating (Global)
@@ -357,7 +357,7 @@ def render():
                     
                     feat_fig = px.bar(x=top_names, y=top_feats, title="Active Senses (Input Gating)", template="plotly_dark", height=200)
                     feat_fig.update_layout(margin=dict(l=0, r=0, t=30, b=0))
-                    st.plotly_chart(feat_fig, key="feat_imp_chart", use_container_width=True)
+                    st.plotly_chart(feat_fig, key="feat_imp_chart", width="stretch")
 
                 # --- B. System 2 Narrative (The "Thought") ---
                 # Mocking logic to generate "Language" from the internal state
@@ -409,7 +409,7 @@ def render():
                 # Mark current tick
                 spectro_fig.add_vline(x=selected_tick, line_color="yellow", line_width=2)
                 
-                st.plotly_chart(spectro_fig, key="spectrogram", use_container_width=True)
+                st.plotly_chart(spectro_fig, key="spectrogram", width="stretch")
 
     # Auto-Refresh Logic (Moved to end to prevent blocking)
     if auto_refresh:

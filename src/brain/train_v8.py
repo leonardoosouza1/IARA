@@ -132,15 +132,30 @@ class CryptoDataset(TensorDataset):
         return self.x[idx], self.y[idx]
 
 def get_dataloaders(batch_size):
-    # Load Cache
+    import glob
+    # Load Cache (Support Sharding or Single File)
     print("📂 Loading Pre-computed Tensors from data/cache/...")
-    train_ds = CryptoDataset("data/cache/train.pt")
-    val_ds = CryptoDataset("data/cache/val.pt")
+    
+    train_shards = sorted(glob.glob("data/cache/train_shards/*.pt"))
+    val_shards = sorted(glob.glob("data/cache/val_shards/*.pt"))
+    
+    print(f"DEBUG: CWD = {os.getcwd()}")
+    print(f"DEBUG: Found {len(train_shards)} train shards at data/cache/train_shards/*.pt")
+    
+    if len(train_shards) > 0:
+        print(f"   Found {len(train_shards)} training shards.")
+        train_ds = torch.utils.data.ConcatDataset([CryptoDataset(f) for f in train_shards])
+        val_ds = torch.utils.data.ConcatDataset([CryptoDataset(f) for f in val_shards])
+    else:
+        print("   Found legacy single-file dataset.")
+        train_ds = CryptoDataset("data/cache/train.pt")
+        val_ds = CryptoDataset("data/cache/val.pt")
     
     print(f"   Train Size: {len(train_ds)} | Val Size: {len(val_ds)}")
     
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=True)
+    # Num workers 0 to avoid multiprocessing overhead/hangs on some systems
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=True, num_workers=0)
     
     return train_loader, val_loader
 
@@ -471,11 +486,10 @@ def main():
         sys.exit(1)
 
     # High Seq Len for Pattern Recognition
-    # V8 Hybrid: Consuming V6 processed tensors which have 18 features
-    INPUT_DIM = 18 
+    # V8.5: Consuming V6.11 processed tensors which have 28 features (M5/15/30/H1 Contexts)
+    INPUT_DIM = 28
     liq_cfg = LiquidConfig(input_dim=INPUT_DIM, hidden_dim=128, max_seq_len=256)
     lnn = ModulatedIARA(liq_cfg)
-    # V8.5 Pure Liquid: LFM Context is 4096 dim
     model = TrinityLiquidBrain(lnn, lfm_hidden_dim=4096).to(device)
     
     # ----------------------------------------------------
@@ -508,21 +522,34 @@ def main():
     
     # TUNING: Switching to standard BCE to debug convergence
     criterion = nn.BCEWithLogitsLoss() # AsymmetricFocalLoss(alpha=0.75, gamma=1.0)
-    scaler = torch.cuda.amp.GradScaler(enabled=(device == "cuda"))
+    # UPDATED: Use torch.amp.GradScaler for future compatibility
+    scaler = torch.amp.GradScaler('cuda', enabled=(device == "cuda"))
     
     # LOAD DATASETS
-    # We access the underlying dataset directly for analysis
     print("📂 Loading Pre-computed Tensors from data/cache/...")
-    train_ds = CryptoDataset("data/cache/train.pt")
-    val_ds = CryptoDataset("data/cache/val.pt")
+    
+    import glob
+    train_shards = sorted(glob.glob("data/cache/train_shards/*.pt"))
+    val_shards = sorted(glob.glob("data/cache/val_shards/*.pt"))
+    
+    if len(train_shards) > 0:
+        print(f"   Found {len(train_shards)} training shards.")
+        train_ds = torch.utils.data.ConcatDataset([CryptoDataset(f) for f in train_shards])
+        val_ds = torch.utils.data.ConcatDataset([CryptoDataset(f) for f in val_shards])
+    else:
+        print("   Found legacy single-file dataset.")
+        train_ds = CryptoDataset("data/cache/train.pt")
+        val_ds = CryptoDataset("data/cache/val.pt")
+        
     print(f"   Train Size: {len(train_ds)} | Val Size: {len(val_ds)}")
     
     # Init Selective Memory
     memory = SelectiveMemory(len(train_ds))
     
     # Default Loader (Shuffle) for Epoch 1
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=True)
+    # Num workers 0 to avoid multiprocessing overhead/hangs
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=True, num_workers=0)
     
     steps_per_epoch = len(train_loader)
     print("------------------------------------------------")
@@ -565,7 +592,8 @@ def main():
             optimizer.zero_grad()
             
             # AMP Forward
-            with torch.cuda.amp.autocast(enabled=(device == "cuda")):
+            # UPDATED: Use torch.amp.autocast for future compatibility
+            with torch.amp.autocast('cuda', enabled=(device == "cuda")):
                 outputs = model(inputs, llm_ctx, news_vec)
                 outputs = outputs.squeeze(-1)
                 
