@@ -229,8 +229,12 @@ def main():
         equity = 10000.0
         position = 0.0
         entry_price = 0.0
-        seq_len = 64
+        units = 10000
         is_paused = False
+        last_exit_time = None
+        trade_count = 0
+        last_save_time = 0
+        seq_len = 64
         
         COMMAND_FILE = "logs/sim_command.json"
         if os.path.exists(COMMAND_FILE): os.remove(COMMAND_FILE)
@@ -269,7 +273,8 @@ def main():
                         is_paused = False # Run one step
                     elif cmd == "FLAG_ERROR":
                         if LAST_ENTRY_STATE is not None:
-                             target_label = 1 if LAST_ENTRY_STATE["action"] == "BUY" else 0
+                             # INVERT: If the error was a BUY, the target should have been 0 (SELL/NEUTRAL)
+                             target_label = 0 if LAST_ENTRY_STATE["action"] == "BUY" else 1
                              error_item = {
                                  "x_dict": LAST_ENTRY_STATE["x"],
                                  "y": torch.tensor(target_label, dtype=torch.long),
@@ -385,19 +390,29 @@ def main():
                 
                 if LAST_ENTRY_STATE is not None:
                     # Capture Metadata for training
-                    target_label = 1 if LAST_ENTRY_STATE["action"] == "BUY" else 0
-                    item = {
-                        "x_dict": LAST_ENTRY_STATE["x"],
-                        "y": torch.tensor(target_label, dtype=torch.long),
-                        "timestamp": LAST_ENTRY_STATE["time"].isoformat(),
-                        "pnl": float(pnl_final)
-                    }
-
+                    taken_label = 1 if LAST_ENTRY_STATE["action"] == "BUY" else 0
+                    
                     if pnl_final < 0:
+                        # ERROR: Target should have been the OPPOSITE of what we did
+                        target_label = 1 - taken_label
+                        item = {
+                            "x_dict": LAST_ENTRY_STATE["x"],
+                            "y": torch.tensor(target_label, dtype=torch.long),
+                            "timestamp": LAST_ENTRY_STATE["time"].isoformat(),
+                            "pnl": float(pnl_final)
+                        }
                         processed_errors.append(item)
                         try: torch.save(processed_errors, ERRORS_FILE)
                         except: pass
                     else:
+                        # SUCCESS: Target was indeed what we did
+                        target_label = taken_label
+                        item = {
+                            "x_dict": LAST_ENTRY_STATE["x"],
+                            "y": torch.tensor(target_label, dtype=torch.long),
+                            "timestamp": LAST_ENTRY_STATE["time"].isoformat(),
+                            "pnl": float(pnl_final)
+                        }
                         processed_success.append(item)
                         try: torch.save(processed_success, SUCCESS_FILE)
                         except: pass
@@ -409,9 +424,8 @@ def main():
 
             # Cooldown check
             is_cooldown = False
-            last_exit_time = LAST_ENTRY_STATE.get("exit_time") if LAST_ENTRY_STATE and "exit_time" in LAST_ENTRY_STATE else None
             if last_exit_time:
-                # Cooldown of 3 M5 candles
+                # Cooldown of 3 M5 candles (15 mins)
                 candles_passed = (current_time - last_exit_time).total_seconds() / 300
                 if candles_passed < 3:
                     is_cooldown = True
@@ -433,8 +447,8 @@ def main():
             
             # Record exit time for cooldown if we just closed
             if trade_closed and action not in ["BUY", "SELL"]:
-                if LAST_ENTRY_STATE:
-                    LAST_ENTRY_STATE["exit_time"] = current_time
+                last_exit_time = current_time
+                trade_count += 1
 
             # Current Unrealized PnL
             unrealized_pnl = 0.0
@@ -453,31 +467,33 @@ def main():
             }
             history.append(tick_data)
             
-            # Snapshot
-            votes = model.get_worker_votes(worker_logits)
-            snapshot = {
-                "step": i, "timestamp": current_time.strftime("%Y-%m-%d %H:%M"),
-                "price": float(current_price), 
-                "entry_price": float(entry_price),
-                "units": int(units if position != 0 else 0),
-                "equity": float(total_equity), 
-                "pnl_usd": float(pnl_money),
-                "unrealized_pnl": float(unrealized_pnl),
-                "realized_pnl": float(equity - 10000.0),
-                "prob": float(prob), "action": action,
-                "pos": float(position),
-                "is_cooldown": is_cooldown,
-                "long_bias": float(long_imp.item()), # Raw score
-                "short_bias": float(short_imp.item()), # Raw score
-                "agreement": float(votes["agreement"].mean().item()),
-                "n_long": int(votes["n_long"].mean().item()),
-                "n_short": int(votes["n_short"].mean().item()),
-                "neuronal_map": torch.sigmoid(worker_logits[0]).cpu().tolist(),
-                "completed": False,
-                "history": list(history)
-            }
-            
-            with open("logs/sim_snapshot.json", "w") as f: json.dump(snapshot, f)
+            # Save Snapshot (Freq Capped at 5/sec)
+            now = time.time()
+            if now - last_save_time > 0.2:
+                votes = model.get_worker_votes(worker_logits)
+                snapshot = {
+                    "step": i, "timestamp": current_time.strftime("%Y-%m-%d %H:%M"),
+                    "price": float(current_price), 
+                    "entry_price": float(entry_price),
+                    "units": int(units if position != 0 else 0),
+                    "equity": float(total_equity), 
+                    "pnl_usd": float(pnl_money),
+                    "unrealized_pnl": float(unrealized_pnl),
+                    "realized_pnl": float(equity - 10000.0),
+                    "prob": float(prob), "action": action,
+                    "pos": float(position),
+                    "is_cooldown": is_cooldown, "trade_count": trade_count,
+                    "long_bias": float(long_imp.item()), # Raw score
+                    "short_bias": float(short_imp.item()), # Raw score
+                    "agreement": float(votes["agreement"].mean().item()),
+                    "n_long": int(votes["n_long"].mean().item()),
+                    "n_short": int(votes["n_short"].mean().item()),
+                    "neuronal_map": torch.sigmoid(worker_logits[0]).cpu().tolist(),
+                    "completed": False,
+                    "history": list(history)
+                }
+                with open("logs/sim_snapshot.json", "w") as f: json.dump(snapshot, f)
+                last_save_time = now
             
             if i % 50 == 0:
                 print(f"[{current_time}] Equity: ${total_equity:.2f} | PnL: ${pnl_money:.2f} | Prob: {prob:.2f}")

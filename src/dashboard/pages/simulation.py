@@ -149,7 +149,7 @@ def render():
         return
 
     # TOP BAR: METRICS
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Date", state.get("timestamp", "N/A"))
     c2.metric("Price", f"{state.get('price', 0):.5f}")
     
@@ -158,7 +158,8 @@ def render():
     
     c3.metric("Realized PnL", f"${realized:+.2f}")
     c4.metric("Floating PnL", f"${floating:+.2f}", delta=f"{floating:+.2f}")
-    
+    c5.metric("Trades", state.get("trade_count", 0))
+
     # --- POSITION & COOLDOWN ---
     pos = state.get("pos", 0.0)
     units = state.get("units", 0)
@@ -171,7 +172,7 @@ def render():
     elif pos < 0: pos_label = f"🔴 SHORT (${units:,})"
     
     pos_help = f"Entry: {entry_p:.5f}" if pos != 0 else "Market Neutral"
-    c5.metric("Position", pos_label, help=pos_help)
+    c6.metric("Position", pos_label, help=pos_help)
     
     col_chart, col_brain = st.columns([3, 1])
     

@@ -242,7 +242,11 @@ class MultiTimeframeDataset(Dataset):
         
         # Metadata OHLC (Last 4 columns) for Forensics
         # We only keep it for M5 to save memory
-        x_dict["__ohlc__"] = x[-self.seq_len:, 22:]
+        ohlc = x[-self.seq_len:, 22:]
+        if ohlc.shape[1] < 4:
+            # Pad with zeros if metadata columns are missing in cache
+            ohlc = torch.cat([ohlc, torch.zeros(ohlc.shape[0], 4 - ohlc.shape[1])], dim=1)
+        x_dict["__ohlc__"] = ohlc
         
         # M15: Every 3rd candle
         step_15 = max(1, self.seq_len // 3)
@@ -267,30 +271,35 @@ def collate_multitf(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]):
     """Custom collate function for multi-timeframe batches."""
     x_dicts, ys = zip(*batch)
     
-    # Only collate keys present in ALL items of the batch
+    # Identify common keys
     common_keys = set(x_dicts[0].keys())
     for x in x_dicts[1:]:
         common_keys &= set(x.keys())
     
-    # Stack each timeframe
     x_batch = {}
     for tf in sorted(list(common_keys)):
-        # Get sequence lengths
         seqs = [x[tf] for x in x_dicts]
+        
+        # Check for feature dimension consistency
+        feat_dims = [s.size(-1) for s in seqs]
+        if len(set(feat_dims)) > 1:
+            # If inconsistent, we skip this key (likely metadata mismatch)
+            continue
+            
         max_len = max(s.size(0) for s in seqs)
+        feat_dim = feat_dims[0]
         
         # Pad sequences to same length
         padded = []
         for s in seqs:
             if s.size(0) < max_len:
-                pad = torch.zeros(max_len - s.size(0), s.size(-1))
+                pad = torch.zeros(max_len - s.size(0), feat_dim)
                 s = torch.cat([pad, s], dim=0)
             padded.append(s.unsqueeze(0))
         
         x_batch[tf] = torch.cat(padded, dim=0)
     
     y_batch = torch.stack(ys, dim=0)
-    
     return x_batch, y_batch
 
 
@@ -476,6 +485,7 @@ def train_epoch(
     device: str,
     config: TrainConfig,
     epoch: int,
+    total_epochs: int,
     global_step: int = 0,
     current_lr: float = 0.001
 ) -> Tuple[Dict[str, float], int]:
@@ -571,6 +581,7 @@ def train_epoch(
                     json.dump({
                         "status": "TRAINING",
                         "current_epoch": epoch,
+                        "total_epochs": total_epochs,
                         "current_step": step,
                         "total_steps": len(loader),
                         "loss": step_loss,
@@ -644,6 +655,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train IARA v9 Swarm Intelligence")
     parser.add_argument("--lr", type=float, default=0.0005)
     parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--patience", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--seq_len", type=int, default=64)
     parser.add_argument("--cpu", action="store_true", default=False)
@@ -692,6 +704,7 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.lr,
         epochs=args.epochs,
+        patience=args.patience,
         use_amp=not args.no_amp,
         debug=args.debug
     )
@@ -884,7 +897,7 @@ def main():
         current_lr = optimizer.param_groups[0]['lr']
         train_metrics, global_step = train_epoch(
             model, train_loader, criterion, optimizer, scaler,
-            device, config, epoch + 1, global_step, current_lr
+            device, config, epoch + 1, config.epochs, global_step, current_lr
         )
         
         # Validate

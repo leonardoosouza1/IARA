@@ -123,14 +123,23 @@ def render():
         col1, col2 = st.columns([1, 2])
         with col1:
             st.subheader("Mission Paramters")
-            epochs = st.slider("Epochs", 1, 100, 10)
-            lr = st.number_input("Learning Rate", value=0.0001, format="%.5f")
+            # Epochs & Patience
+            infinite_epochs = st.toggle("Modo Noturno (Infinito)", value=False, help="Define épocas para 1.000.000")
+            if infinite_epochs:
+                epochs = 1000000
+                st.info("🕒 Épocas definidas para 1.000.000")
+            else:
+                epochs = st.slider("Epochs", 1, 1000, 200)
+            
+            patience = st.number_input("Patience (Early Stopping)", value=50, min_value=10, step=10, help="Para o treino após X épocas sem melhora")
+            
+            lr = st.number_input("Learning Rate", value=0.0005, format="%.5f")
             # Batch Size Logic
-            batch_options = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, "Custom"]
-            batch_preset = st.selectbox("Batch Size", batch_options, index=3) # Default 1024
+            batch_options = [64, 128, 256, 512, 1024, 2048, "Custom"]
+            batch_preset = st.selectbox("Batch Size", batch_options, index=0) # Default 64
             
             if batch_preset == "Custom":
-                batch_size = st.number_input("Custom Batch Size", value=1024, min_value=16, step=16)
+                batch_size = st.number_input("Custom Batch Size", value=64, min_value=16, step=16)
             else:
                 batch_size = batch_preset
             device_mode = st.radio("Compute Unit", ["GPU (ROCm)", "CPU"], index=0)
@@ -140,8 +149,8 @@ def render():
             
             # Advanced Options
             with st.expander("Advanced Configuration"):
-                disable_amp = st.checkbox("Disable Mixed Precision (AMP)", value=True, help="Check this if training hangs on ROCm")
-                debug_mode = st.checkbox("Debug Mode (Log Steps)", value=True, help="Detailed logging for diagnosis")
+                disable_amp = st.checkbox("Disable Mixed Precision (AMP)", value=False, help="Check this if training hangs on ROCm")
+                debug_mode = st.checkbox("Debug Mode (Log Steps)", value=False, help="Detailed logging for diagnosis")
             
             launch_btn = st.button("🚀 DEPLOY TRAINING MISSION", type="primary", disabled=is_training_running())
             stop_btn = st.button("🛑 ABORT MISSION", type="secondary", disabled=not is_training_running())
@@ -214,7 +223,13 @@ def render():
                      st.error(f"Leaderboard Error: {e}")
 
         if launch_btn:
-            cmd = ["python3", TRAIN_SCRIPT, "--epochs", str(epochs), "--lr", str(lr), "--batch_size", str(batch_size)]
+            cmd = [
+                "python3", TRAIN_SCRIPT, 
+                "--epochs", str(epochs), 
+                "--patience", str(patience),
+                "--lr", str(lr), 
+                "--batch_size", str(batch_size)
+            ]
             if device_mode == "CPU":
                 cmd.append("--cpu")
             
