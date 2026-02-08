@@ -10,6 +10,9 @@ from plotly.subplots import make_subplots
 import json
 import numpy as np
 import torch
+import datetime
+
+print(f">>> [{datetime.datetime.now()}] RELOADING training.py (v9.6) <<<")
 
 # Constants
 TRAIN_SCRIPT = "src/brain/train_v9.py"  # Updated to v9 Swarm Intelligence
@@ -73,14 +76,31 @@ def is_training_running():
 
 def stop_training():
     if os.path.exists(PID_FILE):
-        with open(PID_FILE, "r") as f:
-            pid = int(f.read().strip())
         try:
-            os.kill(pid, signal.SIGTERM)
-            st.toast(f"🛑 Process {pid} terminated.", icon="🛑")
-        except OSError:
-            pass
-        os.remove(PID_FILE)
+            with open(PID_FILE, "r") as f:
+                pid = int(f.read().strip())
+                
+            # Kill process group (parent + children like dataloaders)
+            try:
+                os.killpg(pid, signal.SIGTERM)
+                time.sleep(1) # Give it a second to die gracefully
+            except OSError:
+                pass # Process might be gone already
+
+            # Force kill if still alive
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+                
+            st.toast(f"🛑 Mission Aborted (PID {pid} killed)", icon="skull")
+            
+        except Exception as e:
+            st.error(f"Error checking PID: {e}")
+        
+        # Always clean up PID file
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
 
 def render():
     # Note: st.set_page_config must NOT be called here as it is set in app.py
@@ -341,6 +361,7 @@ def render():
     # === TAB 3: FORENSIC LAB ===
     with tab_forensics:
         st.markdown("### 🕵️ Forensic Replay (Time Travel)")
+        st.caption("Forensic Engine v9.6 (Fixed)")
         st.info("Analise o estado interno do Swarm Brain durante épocas passadas. Workers M5 e H1 são mapeados como \"Long\" e \"Short\" experts.")
         
         # 1. Snapshot Loader
@@ -537,20 +558,20 @@ def render():
                     
                     
                     # 2. Feature Gating (Global)
-                    feats = data["feature_importance"]
+                    feature_importances = data.get("feature_importance", [1.0] * 12)
                     
                     # Map Feature Indices to Names (Based on train_v8.py generator)
                     # 0=NormClose, 1=NormMom, 2=NormVol, 3..15=Noise
                     feat_names = []
-                    for i in range(len(feats)):
+                    for i in range(len(feature_importances)):
                         if i == 0: feat_names.append("F0: Price")
                         elif i == 1: feat_names.append("F1: Momentum")
                         elif i == 2: feat_names.append("F2: Volatility")
                         else: feat_names.append(f"F{i}: Noise")
                         
                     # Top 5 Features
-                    indices = np.argsort(feats)[::-1][:5]
-                    top_feats = [feats[i] for i in indices]
+                    indices = np.argsort(feature_importances)[::-1][:5]
+                    top_feats = [feature_importances[i] for i in indices]
                     top_names = [feat_names[i] for i in indices]
                     
                     feat_fig = px.bar(x=top_names, y=top_feats, title="Active Senses (Input Gating)", template="plotly_dark", height=200)
@@ -560,7 +581,7 @@ def render():
                 # --- B. System 2 Narrative (The "Thought") ---
                 # Mocking logic to generate "Language" from the internal state
                 sys2_msg = ""
-                top_idx = indices[0]
+                top_idx = indices[0] if len(indices) > 0 else 0
                 expert_diff = long_curve[selected_tick] - short_curve[selected_tick]
                 
                 if top_idx == 0: focus = "Price Action"
@@ -585,7 +606,8 @@ def render():
                 # --- C. Neural Spectrogram (Bottom) ---
                 st.markdown("#### ⚡ Neural Activation Spectrogram")
                 # Ensure we have the full sequence of hidden states
-                hidden_state = np.array(data["hidden_activity"]) # [Hidden, Seq]
+                hidden_state_raw = data.get("hidden_activity", [[0.0] * 100 for _ in range(32)])
+                hidden_state = np.array(hidden_state_raw) # [Hidden, Seq]
                 
                 # Trim to seq_len
                 hidden_state = hidden_state[:, :seq_len]
@@ -642,21 +664,38 @@ def render():
                         st.rerun()
                     
                     # Promoção para Zoo
-                    to_promote = st.selectbox("Promover para Zoo:", ["-- Selecione --"] + backup_files, key="promote_model")
-                    promote_name = st.text_input("Nome no Zoo (ex: v9_auc78):", key="promote_name")
+                    st.markdown("---")
+                    st.markdown("##### 🚀 Promoção")
                     
-                    if col_promote.button("🏆 Promover para Zoo", disabled=(to_promote == "-- Selecione --" or not promote_name)):
-                        src = os.path.join(MODELS_DIR, to_promote)
-                        dst = os.path.join(MODEL_ZOO_DIR, f"{promote_name}.pth")
-                        try:
-                            os.makedirs(MODEL_ZOO_DIR, exist_ok=True)
-                            import shutil
-                            shutil.copy2(src, dst)
-                            st.toast(f"Modelo promovido para Zoo como {promote_name}.pth!", icon="🏆")
-                            time.sleep(0.5)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Erro: {e}")
+                    to_promote = st.selectbox("Selecione modelo para promover:", ["-- Selecione --"] + backup_files, key="promote_model")
+                    
+                    # Sugerir nome baseado na seleção
+                    default_name = to_promote.replace(".pth", "") if to_promote != "-- Selecione --" else ""
+                    promote_name = st.text_input("Renomear para (Opcional):", value="", placeholder=f"Padrão: {default_name}", key="promote_name")
+                    
+                    # Logic: If name provided, use it. Else use original filename.
+                    final_name = promote_name.strip() if promote_name.strip() else default_name
+                    
+                    btn_disabled = (to_promote == "-- Selecione --")
+                    
+                    if st.button("🏆 Promover para Zoo", disabled=btn_disabled, type="primary"):
+                        if not final_name: 
+                            st.error("Nome inválido!")
+                        else:
+                            src = os.path.join(MODELS_DIR, to_promote)
+                            dst = os.path.join(MODEL_ZOO_DIR, f"{final_name}.pth")
+                            try:
+                                if not os.path.exists(src):
+                                    st.error(f"Arquivo fonte não encontrado: {to_promote}")
+                                else:
+                                    os.makedirs(MODEL_ZOO_DIR, exist_ok=True)
+                                    import shutil
+                                    shutil.copy2(src, dst)
+                                    st.success(f"✅ Modelo promovido para: {final_name}.pth")
+                                    time.sleep(1)
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"Erro ao promover: {e}")
                     
                     # Lista com detalhes
                     with st.expander("Ver detalhes dos backups"):

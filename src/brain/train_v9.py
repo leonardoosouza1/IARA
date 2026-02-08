@@ -309,16 +309,27 @@ class SelectiveMemory:
         dataset: Dataset, 
         device: str,
         criterion: nn.Module,
-        batch_size: int = 512
+        batch_size: int = 512,
+        sample_size: Optional[int] = None
     ) -> WeightedRandomSampler:
         """Compute sample weights for curriculum learning."""
-        logger.info("🧠 Deep Thought: Analyzing sample difficulty...")
+        
+        num_total = len(dataset)
+        indices = np.arange(num_total)
+        
+        if sample_size and sample_size < num_total:
+             logger.info(f"🧠 Deep Thought: Analyzing random subset of {sample_size} samples...")
+             indices = np.random.choice(indices, size=sample_size, replace=False)
+             analysis_ds = torch.utils.data.Subset(dataset, indices)
+        else:
+             logger.info("🧠 Deep Thought: Analyzing ALL samples...")
+             analysis_ds = dataset
         
         model.eval()
         losses = []
         
         loader = DataLoader(
-            dataset, 
+            analysis_ds, 
             batch_size=batch_size, 
             shuffle=False,
             collate_fn=collate_multitf,
@@ -335,10 +346,6 @@ class SelectiveMemory:
                     # Forward
                     logits, worker_logits, _, _ = model(x_dict)
                     
-                    # Per-sample loss
-                    loss_dict = criterion(logits, worker_logits, targets)
-                    loss = loss_dict['total']
-                    
                     # Store individual losses
                     bce = nn.functional.binary_cross_entropy_with_logits(
                         logits.view(-1), 
@@ -347,33 +354,46 @@ class SelectiveMemory:
                     )
                     losses.append(bce.cpu())
                     
-                    if len(losses) % 100 == 0:
+                    if len(losses) % 20 == 0:
                         import gc
                         gc.collect() # Force GC to avoid OOM
-                        logger.info(f"    - Analyzed {len(losses)*batch_size} samples...")
-        
+                        
+        if not losses:
+            return None
+
         current_losses = torch.cat(losses)
         
-        # Resize if needed
-        if len(self.sample_loss_ema) != len(current_losses):
-            self.sample_loss_ema = torch.ones_like(current_losses)
-            self.chronic_counter = torch.zeros_like(current_losses, dtype=torch.int16)
-            self.mastered_counter = torch.zeros_like(current_losses, dtype=torch.int16)
-            self.noise_mask = torch.zeros_like(current_losses, dtype=torch.bool)
+        # Ensure state tensors match dataset size (resizing if dataset grew)
+        if len(self.sample_loss_ema) != num_total:
+             logger.info(f"⚠️ Resizing memory state from {len(self.sample_loss_ema)} to {num_total}")
+             # Extend with ones/zeros
+             new_size = num_total - len(self.sample_loss_ema)
+             self.sample_loss_ema = torch.cat([self.sample_loss_ema, torch.ones(new_size)])
+             self.chronic_counter = torch.cat([self.chronic_counter, torch.zeros(new_size, dtype=torch.int16)])
+             self.mastered_counter = torch.cat([self.mastered_counter, torch.zeros(new_size, dtype=torch.int16)])
+        
+        # Update EMA only for analyzed indices
+        # We need to map back to original indices. 
+        # current_losses corresponds to 'indices' array.
+        
+        indices_tensor = torch.tensor(indices, dtype=torch.long)
         
         # Update EMA
-        self.sample_loss_ema = self.alpha * self.sample_loss_ema + (1 - self.alpha) * current_losses
+        # self.sample_loss_ema[indices] = alpha * old + (1-alpha) * new
+        old_ema = self.sample_loss_ema[indices_tensor]
+        new_ema = self.alpha * old_ema + (1 - self.alpha) * current_losses
+        self.sample_loss_ema[indices_tensor] = new_ema
         
         # Update counters
         high_loss = current_losses > 0.9
-        self.chronic_counter[high_loss] += 1
-        self.chronic_counter[~high_loss] = 0
+        self.chronic_counter[indices_tensor[high_loss]] += 1
+        self.chronic_counter[indices_tensor[~high_loss]] = 0
         
         low_loss = current_losses < 0.3
-        self.mastered_counter[low_loss] += 1
-        self.mastered_counter[~low_loss] = 0
+        self.mastered_counter[indices_tensor[low_loss]] += 1
+        self.mastered_counter[indices_tensor[~low_loss]] = 0
         
-        # Compute weights
+        # Compute weights for WHOLE dataset
         weights = (self.sample_loss_ema + 0.05) ** 2
         
         # Boost chronic
@@ -766,23 +786,25 @@ def main():
         if epoch > 0:
             try:
                 # logger.info("🔄 Starting Selective Memory Analysis...")
-                # sampler = memory.analyze(model, train_ds, device, criterion)
-                # train_loader = DataLoader(
-                #     train_ds,
-                #     batch_size=config.batch_size,
-                #     sampler=sampler,
-                #     collate_fn=collate_multitf,
-                #     drop_last=True,
-                #     num_workers=0
-                # )
-                # logger.info("✅ Selective Memory Analysis Complete.")
-                 
-                 # TEMPORARY OOM FIX: Skip analysis and use shuffle
-                 logger.info("⚠️ Skipping Selective Memory to prevent OOM. Using standard shuffle.")
-                 raise Exception("OOM Prevention")
+                sampler = memory.analyze(model, train_ds, device, criterion, sample_size=20000)
+                
+                if sampler:
+                    train_loader = DataLoader(
+                        train_ds,
+                        batch_size=config.batch_size,
+                        sampler=sampler,
+                        collate_fn=collate_multitf,
+                        drop_last=True,
+                        num_workers=0
+                    )
+                    logger.info("✅ Selective Memory Analysis Complete (Sampled 20k)")
+                else:
+                    logger.warning("⚠️ Selective Memory returned no sampler. Using standard shuffle.")
+                    raise Exception("No sampler")
                  
             except Exception as e:
                 # Fallback to standard loader if selective memory crashes
+                # logger.warning(f"⚠️ Selective Memory failed: {e}")
                 train_loader = DataLoader(
                     train_ds,
                     batch_size=config.batch_size,
@@ -905,23 +927,26 @@ def save_forensic_snapshot(model, loader, device, epoch, config):
         
         with torch.no_grad():
             # Forward pass
-            logits, worker_logits, coord_attn, _ = model(x_dict)
+            # SwarmBrain v9 returns: logits, worker_logits, long_score, short_score
+            logits, worker_logits, long_score, short_score = model(x_dict)
             probs = torch.sigmoid(logits).cpu().numpy()
             
-            # logger.info(f"    Logits shape: {logits.shape}")
+            # worker_logits shape: [batch, num_workers, 3]
+            # Mapping indices to names for Forensic Lab v8 compatibility:
+            # Worker 0 = M5 (Short-term), Worker 3 = H1 (Long-term)
+            try:
+                w_m5 = torch.sigmoid(worker_logits[:, 0, 0]).cpu().numpy().flatten() # index 0 is LONG prob
+                w_h1 = torch.sigmoid(worker_logits[:, 3, 0]).cpu().numpy().flatten()
+            except Exception as e:
+                logger.warning(f"    ⚠️ Failed to map worker indices: {e}")
+                w_m5 = torch.zeros_like(logits).flatten().cpu().numpy()
+                w_h1 = torch.zeros_like(logits).flatten().cpu().numpy()
             
-            # Map v9 topology to v8 dashboard format (Approximation)
-            # v8 expected "expert_conviction": {"long": [], "short": []}
-            # v9 has 5 workers. We will use Worker 0 (M5) and Worker 3 (H1) as proxies for "Experts"
-            
-            if "M5" not in worker_logits or "H1" not in worker_logits:
-                 logger.warning(f"    ⚠️ Missing worker logits. Keys: {worker_logits.keys()}")
-                 # Create dummy if missing
-                 w_m5 = torch.zeros_like(logits).flatten().cpu().numpy()
-                 w_h1 = torch.zeros_like(logits).flatten().cpu().numpy()
-            else:
-                 w_m5 = torch.sigmoid(worker_logits["M5"]).cpu().numpy().flatten()
-                 w_h1 = torch.sigmoid(worker_logits["H1"]).cpu().numpy().flatten()
+            # Map coordination/attention (v9 uses cross-attention weights)
+            # For now, we mock the attention map if not easily extractable
+            coord_attn = None 
+            if hasattr(model.coordinator, 'fusion') and hasattr(model.coordinator.fusion, 'last_attn'):
+                coord_attn = model.coordinator.fusion.last_attn
             
             # Extract sample input (Close price normalized)
             # Ensure it's a tensor before converting
@@ -940,6 +965,8 @@ def save_forensic_snapshot(model, loader, device, epoch, config):
                     "short": w_h1.tolist()[:100], # Long-term expert (H1)
                     "consensus": probs.flatten().tolist()[:100] # Coordinator
                 },
+                "feature_importance": [1.0] * 12, # Dummy for v9 compatibility
+                "hidden_activity": [[0.0] * 100 for _ in range(32)], # Dummy for v9 compatibility
                 "attention_map": coord_attn.cpu().numpy().tolist()[:1] if coord_attn is not None else []
             }
             

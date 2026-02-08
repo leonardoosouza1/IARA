@@ -12,8 +12,8 @@ import plotly.express as px
 # Constants
 LOG_DIR = "logs"
 ZOO_DIR = os.path.join(LOG_DIR, "model_zoo")
-SIM_DATA = "data/raw/EURUSD_synthetic.csv"
-SIM_SCRIPT = "src/brain/simulate_v8.py"
+SIM_DATA = "data/processed/EURUSD.parquet"
+SIM_SCRIPT = "src/brain/backtest_v9.py"
 SIM_SNAPSHOT_FILE = os.path.join(LOG_DIR, "sim_snapshot.json")
 SIM_PID_FILE = "simulation_process.pid"
 
