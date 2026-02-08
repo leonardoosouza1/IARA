@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
 import numpy as np
+import torch
 
 # Constants
 TRAIN_SCRIPT = "src/brain/train_v9.py"  # Updated to v9 Swarm Intelligence
@@ -219,14 +220,15 @@ def render():
         # Refresh Controls
         col_ref1, col_ref2 = st.columns([1, 3])
         with col_ref1:
-            if st.button("🔄 Refresh Now"):
+            if st.button("🔄 Refresh Now (Clear Cache)"):
+                st.cache_data.clear()
                 st.rerun()
         with col_ref2:
-            auto_ref = st.toggle("Auto-Refresh (5s)", value=True)
+            auto_ref = st.toggle("Auto-Refresh (3s)", value=True)
             
-        if auto_ref:
-            time.sleep(5)
-            st.rerun()
+        from datetime import datetime
+        st.caption(f"🕒 Server Time: {datetime.now().strftime('%H:%M:%S')} (If this stops, refresh browser)")
+
 
         # Check telemetry
         if not os.path.exists(TELEMETRY_FILE):
@@ -240,12 +242,12 @@ def render():
                  current_epoch = telemetry.get("current_epoch", 0)
                  total_epochs = telemetry.get("total_epochs", 100)
                  
+                 
                  # Progress Bar
                  progress = min(1.0, current_epoch / max(1, total_epochs))
-                 st.markdown("#### 🚀 Mission Progress")
+                 st.markdown("#### 🚀 Mission Progress (v9.5 LIVE)")
                  st.progress(progress, text=f"Epoch {current_epoch} / {total_epochs}")
                  
-                 import torch # Ensure torch is imported for device check
                  
                  col_t1, col_t2, col_t3, col_t4 = st.columns(4)
                  col_t1.metric("Status", telemetry.get("status", "UNKNOWN"))
@@ -330,7 +332,11 @@ def render():
              except json.JSONDecodeError:
                  st.caption("Syncing telemetry...")
              except Exception as e:
-                 st.error(f"Telemetry Read Error: {e}")
+                  st.error(f"Telemetry Read Error: {e}")
+        
+        if auto_ref:
+            time.sleep(3)
+            st.rerun()
 
     # === TAB 3: FORENSIC LAB ===
     with tab_forensics:
