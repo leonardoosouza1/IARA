@@ -252,6 +252,27 @@ src/brain/
 
 ---
 
+---
+
+## Training Stability & Self-Correction (v9.6)
+
+A v9.6 introduziu subsistemas para garantir que o treinamento seja resiliente a ruidos de mercado e "esquecimento catastrófico".
+
+### 1. Autonomous Rollback System
+O cérebro monitora sua própria performance em tempo real. Se o **Validation AUC** cai mais de **5%** em uma única época (sinal de confusão ou overfitting agudo):
+- **Backup**: O modelo descarta o aprendizado da última época.
+- **Restore**: Restaura os pesos do melhor estado anterior (`best_model_v9.pth`).
+- **Adaptation**: Reduz o Learning Rate em **20%** automaticamente para ser mais cauteloso na próxima tentativa.
+
+### 2. Selective Memory v9.6 (Curriculum Stabilizer)
+O algoritmo de amostragem foi refinado para evitar que o modelo foque excessivamente em erros e esqueça os acertos:
+- **Starting Loss (0.6)**: Novos dados entram com um peso neutro, evitando "pânico" inicial.
+- **Diversity Mix (10%)**: Cada batch contém obrigatoriamente 10% de dados puramente aleatórios, agindo como uma revisão constante de conceitos básicos.
+- **Coverage coverage (60k)**: O mapa sináptico é atualizado 3x mais rápido para evitar que informações fiquem obsoletas.
+- **Softer exponent (^1.5)**: A pressão de seleção foi suavizada para uma transição de currículo mais orgânica.
+
+---
+
 ## Migration Path
 
 ### Phase 1: Foundation

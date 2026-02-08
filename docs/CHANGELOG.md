@@ -1,6 +1,23 @@
 # Changelog - SACI Project
 
-## [V9 - Swarm Intelligence] - Friday, Feb 7 2026 (Current)
+## [V9.6 - Stability & Curriculum] - Sunday, Feb 8 2026 (Current)
+### Curriculum Stabilization
+- **Selective Memory v9.6**: 
+    - **Neutral Initialization**: Starting memory at 0.6 Loss (Neutral) instead of 1.0 (Panic) to prevent extreme bias.
+    - **Diversity Mix**: Guaranteed **10% random background** in every batch to prevent catastrophic forgetting.
+    - **Coverage Boost**: Analysis coverage increased to **60,000 samples** per epoch (3x speedup).
+    - **Softer Weights**: Reduced selection pressure from `^2.0` to `^1.5` for smoother convergence.
+- **UI & Visualization**:
+    - **Atomic Telemetry**: Fixed dashboard flickering by implementing atomic file write/replace operations.
+    - **Fixed Chart Scaling**: Locked Training Dynamics axis (Loss/AUC) to [0, 1] for intuitive visual monitoring.
+
+## [V9.5 - Self-Correcting Brain] - Saturday, Feb 7 2026
+### Autonomous Resilience
+- **Autonomous Rollback**: Brain can now sense "Confusion" (Drop > 5% in AUC) and auto-revert to the previous best state.
+- **Dynamic Speed Reduction**: Automatically reduces Learning Rate by **20%** after a rollback to approach hard patterns more carefully.
+- **Persistence Fix**: Ensured human-captured feedback persists across the entire training mission.
+
+## [V9.0 - Swarm Intelligence] - Friday, Feb 7 2026
 ### The "Fractal Consensus" Architecture
 - **Swarm Intelligence**: Replaced monolithic model with **5 Specialized Workers** (M5, M15, M30, H1, H4).
 - **LightningWorker**: Ultra-light CfC cells (~32 units each) for each timeframe.

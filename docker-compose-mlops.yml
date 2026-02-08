@@ -90,11 +90,6 @@ services:
       - HSA_OVERRIDE_GFX_VERSION=10.3.0
       - OLLAMA_URL=http://ollama:11434/api/generate
       - PYTHONPATH=/app
-    depends_on:
-      db:
-        condition: service_healthy
-      mlflow:
-        condition: service_started
     networks:
       - saci-net
     command: >

@@ -104,6 +104,19 @@ Despite the robust engine, the model stuck at ~50% accuracy (Random Guess).
 *   **Scalability**: The system can now handle massive datasets and concurrent experiments.
 *   **Visibility**: Real-time dashboards reading directly from the database (Trade Hub).
 
+## Phase 5: The Stability & Resonance Era (v9.5 - v9.6)
+**Goal:** Achieving long-term training sessions that don't degrade.
+
+### v9.5: Autonomous Rollback
+**Problem:** The model could enter "Catastrophic Forgetting" states during long overnight runs if the market noise increased.
+*   **Solution:** **Self-Monitoring Brain**. The training loop now detects AUC drops > 5% and automatically rolls back weights to the best previous state and reduces Learning Rate by 20%.
+
+### v9.6: Curriculum Stabilization
+**Problem:** Sampling was too aggressive, focusing 100x more on errors than standard data, leading to a loss of basic pattern recognition.
+*   **Innovation:** **The Diversity Mix (10%)**. Injected a constant stream of random samples into every batch to act as a "Biological Anchor".
+*   **Innovation:** **Broader Memory Coverage**. 3x faster memory analysis (60k samples) ensures the AI isn't learning from stale assumptions.
+*   **Result:** Stable AUC/Accuracy curves for infinite training sessions.
+
 ---
 
 ## Summary of Major Technical Breakthroughs
@@ -115,6 +128,8 @@ Despite the robust engine, the model stuck at ~50% accuracy (Random Guess).
 | **CPU Feature Factory** | v6.9 | ROCm HIPBLAS Errors & Data Loading Bottlenecks |
 | **Hierarchical Curation** | v6.11 | Low Signal-to-Noise Ratio (AUC ~0.50) |
 | **MLOps Infrastructure** | v7.0 | Lack of Experiment Tracking & Scalable Storage |
+| **Autonomous Rollback** | v9.5 | Training Degradation & Catastrophic Forgetting |
+| **Selective Memory v9.6** | v9.6 | Extreme Sampling Bias & Knowledge Stability |
 
 ## Conclusion
 The evolution of I.A.R.A. demonstrates that in financial machine learning, **Architecture < Data Curation**. No amount of LSTM/Transformer complexity could solve the foundational issue of market noise. The breakthrough came not from a smarter neuron, but from a smarter **teacher** (The Hierarchical Curator) that refuses to train the model on ambiguous data.
