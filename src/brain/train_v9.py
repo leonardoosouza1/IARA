@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import torch
@@ -358,7 +358,8 @@ class SelectiveMemory:
     
     def __init__(self, num_samples: int, alpha: float = 0.7):
         self.alpha = alpha
-        self.sample_loss_ema = torch.ones(num_samples)
+        # Initialize with 0.6 (neutral) instead of 1.0 to avoid extreme bias on new data
+        self.sample_loss_ema = torch.full((num_samples,), 0.6)
         self.chronic_counter = torch.zeros(num_samples, dtype=torch.int16)
         self.mastered_counter = torch.zeros(num_samples, dtype=torch.int16)
         self.noise_mask = torch.zeros(num_samples, dtype=torch.bool)
@@ -370,7 +371,8 @@ class SelectiveMemory:
         device: str,
         criterion: nn.Module,
         batch_size: int = 512,
-        sample_size: Optional[int] = None
+        sample_size: Optional[int] = None,
+        captured_indices: Optional[range] = None
     ) -> WeightedRandomSampler:
         """Compute sample weights for curriculum learning."""
         
@@ -454,16 +456,26 @@ class SelectiveMemory:
         self.mastered_counter[indices_tensor[~low_loss]] = 0
         
         # Compute weights for WHOLE dataset
-        weights = (self.sample_loss_ema + 0.05) ** 2
+        # Exponent 1.5 instead of 2.0 for smoother curriculum (less aggressive)
+        weights = (self.sample_loss_ema + 0.05) ** 1.5
         
-        # Boost chronic
-        weights[self.chronic_counter >= 3] *= 3.0
+        # Boost chronic - Threshold 2 instead of 3 to react faster
+        weights[self.chronic_counter >= 2] *= 3.0
         
         # Suppress mastered
         weights[self.mastered_counter >= 5] *= 0.1
         
+        # Boost Captured (Human Feedback)
+        if captured_indices is not None:
+             weights[list(captured_indices)] *= 5.0
+        
+        # 10% Diversity Mix (Random Background)
+        # Adds a baseline weight to all samples to prevent catastrophic forgetting
+        diversity_floor = weights.mean() * 0.1
+        weights = weights + diversity_floor
+        
         # Stats
-        n_chronic = (self.chronic_counter >= 3).sum().item()
+        n_chronic = (self.chronic_counter >= 2).sum().item()
         n_mastered = (self.mastered_counter >= 5).sum().item()
         logger.info(f"  📊 Stats: {n_chronic} Chronic | {n_mastered} Mastered")
         
@@ -474,6 +486,29 @@ class SelectiveMemory:
             num_samples=len(weights),
             replacement=True
         )
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Export memory statistics for dashboard visualization."""
+        try:
+            # 1. Distribution of Loss (Memory state)
+            hist = torch.histc(self.sample_loss_ema, bins=10, min=0.0, max=1.0)
+            loss_dist = hist.tolist()
+            
+            # 2. Key stats
+            n_samples = len(self.sample_loss_ema)
+            n_chronic = (self.chronic_counter >= 3).sum().item()
+            n_mastered = (self.mastered_counter >= 5).sum().item()
+            
+            return {
+                "loss_distribution": loss_dist,
+                "n_chronic": n_chronic,
+                "n_mastered": n_mastered,
+                "n_total": n_samples,
+                "mean_loss": float(self.sample_loss_ema.mean().item()),
+                "max_loss": float(self.sample_loss_ema.max().item())
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
 
 def train_epoch(
@@ -559,15 +594,18 @@ def train_epoch(
                 
                 # Real AUC for the step (if possible)
                 try:
-                    step_auc = roc_auc_score(targets.cpu().numpy().flatten(), probs.flatten())
+                    # Check if both classes are present in the batch
+                    if len(np.unique(targets.cpu().numpy())) > 1:
+                        step_auc = roc_auc_score(targets.cpu().numpy().flatten(), probs.flatten())
+                    else:
+                        step_auc = df["auc"].iloc[-1] if not df.empty else 0.5 # Use last known if available
                 except:
-                    step_auc = 0.5 # Fallback if batch has only one class
+                    step_auc = 0.5 
                 
                 logger.info(
                     f"Epoch {epoch} | Step {step}/{len(loader)} | "
                     f"Loss: {step_loss:.4f} | "
-                    f"Coord: {loss_dict['coord'].item():.4f} | "
-                    f"Workers: {loss_dict['workers'].item():.4f} | "
+                    f"AUC: {step_auc:.4f} | "
                     f"RAM: {mem_usage:.0f} MB"
                 )
                 
@@ -576,9 +614,9 @@ def train_epoch(
                     writer = csv.writer(f)
                     writer.writerow([global_step, epoch, step_loss, step_acc, step_auc, current_lr])
                 
-                # Update real-time telemetry
-                with open(TELEMETRY_FILE, "w") as f:
-                    json.dump({
+                # Update real-time telemetry (PERSISTENT version to avoid flickering)
+                try:
+                    tele_data = {
                         "status": "TRAINING",
                         "current_epoch": epoch,
                         "total_epochs": total_epochs,
@@ -587,8 +625,25 @@ def train_epoch(
                         "loss": step_loss,
                         "acc": step_acc,
                         "auc": step_auc,
-                        "mem": mem_usage
-                    }, f)
+                        "mem": mem_usage,
+                        "lr": current_lr
+                    }
+                    
+                    # Merge with existing data if exists (to keep memory_stats and rollback_count)
+                    if os.path.exists(TELEMETRY_FILE):
+                        with open(TELEMETRY_FILE, "r") as f:
+                            existing = json.load(f)
+                            # Only overwrite if same status or if it's a training update
+                            for key in ["rollback_count", "memory_stats", "device"]:
+                                if key in existing:
+                                    tele_data[key] = existing[key]
+                    
+                    temp_path = f"{TELEMETRY_FILE}.tmp"
+                    with open(temp_path, "w") as f:
+                        json.dump(tele_data, f, indent=2)
+                    os.replace(temp_path, TELEMETRY_FILE)
+                except:
+                    pass
         
         global_step += 1
     
@@ -805,31 +860,26 @@ def main():
     # AMP scaler
     scaler = torch.amp.GradScaler('cuda', enabled=(device == "cuda"))
     
-    # Selective Memory
-    memory = SelectiveMemory(len(train_ds))
-    
-    # Leaderboard
-    leaderboard = Leaderboard()
-    
-    # Feedback Loop (Hard Examples, Successes, Patterns)
+    # Feedback Loop (Captured Examples)
     feedback_sources = [
         Path("logs/backtest_errors.pt"),
         Path("logs/backtest_success.pt"),
         Path("logs/pattern_reservoir.pt")
     ]
     captured_ds = CapturedExampleDataset(feedback_sources, seq_len=config.seq_len)
+    leaderboard = Leaderboard()
     
     if len(captured_ds) > 0:
         logger.info(f"🚀 Integrating {len(captured_ds)} captured examples into training set...")
         from torch.utils.data import ConcatDataset
-        train_loader_ds = ConcatDataset([train_ds, captured_ds])
-        logger.info(f"📊 Combined dataset size: {len(train_loader_ds)}")
+        full_train_ds = ConcatDataset([train_ds, captured_ds])
+        logger.info(f"📊 Combined dataset size: {len(full_train_ds)}")
     else:
-        train_loader_ds = train_ds
+        full_train_ds = train_ds
 
     # DataLoaders
     train_loader = DataLoader(
-        train_loader_ds,
+        full_train_ds,
         batch_size=config.batch_size,
         shuffle=True,
         collate_fn=collate_multitf,
@@ -849,6 +899,9 @@ def main():
     
     logger.info(f"  Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
     
+    # Selective Memory initialized with FULL dataset
+    memory = SelectiveMemory(len(full_train_ds))
+    
     # Training loop
     logger.info("=" * 60)
     logger.info("🚀 Starting Training v9 Swarm Intelligence...")
@@ -856,6 +909,10 @@ def main():
     
     best_val_auc = 0.0
     patience_counter = 0
+    rollback_count = 0
+    
+    # Track indices for human feedback boosting
+    captured_indices = range(len(train_ds), len(full_train_ds)) if len(captured_ds) > 0 else None
     
     for epoch in range(start_epoch, config.epochs):
         epoch_start = time.time()
@@ -864,12 +921,16 @@ def main():
         # Update sampler after first epoch
         if epoch > 0:
             try:
-                # logger.info("🔄 Starting Selective Memory Analysis...")
-                sampler = memory.analyze(model, train_ds, device, criterion, sample_size=20000)
+                # Use full_train_ds for memory analysis
+                # sample_size increased to 60,000 for better coverage
+                sampler = memory.analyze(
+                    model, full_train_ds, device, criterion, 
+                    sample_size=60000, captured_indices=captured_indices
+                )
                 
                 if sampler:
                     train_loader = DataLoader(
-                        train_ds,
+                        full_train_ds,
                         batch_size=config.batch_size,
                         sampler=sampler,
                         collate_fn=collate_multitf,
@@ -878,14 +939,12 @@ def main():
                     )
                     logger.info("✅ Selective Memory Analysis Complete (Sampled 20k)")
                 else:
-                    logger.warning("⚠️ Selective Memory returned no sampler. Using standard shuffle.")
                     raise Exception("No sampler")
                  
             except Exception as e:
-                # Fallback to standard loader if selective memory crashes
-                # logger.warning(f"⚠️ Selective Memory failed: {e}")
+                # Fallback to standard loader
                 train_loader = DataLoader(
-                    train_ds,
+                    full_train_ds,
                     batch_size=config.batch_size,
                     shuffle=True,
                     collate_fn=collate_multitf,
@@ -900,20 +959,46 @@ def main():
             device, config, epoch + 1, config.epochs, global_step, current_lr
         )
         
-        # Validate
+        # Validation
         val_metrics = validate(model, val_loader, criterion, device)
         
         # Save Forensic Snapshot (First batch of validation)
-        if (epoch + 1) % 1 == 0: # Save every epoch
-            try:
-                save_forensic_snapshot(model, val_loader, device, epoch + 1, config)
-            except Exception as e:
-                logger.error(f"⚠️ Forensic Snapshot Failed (Non-critical): {e}")
-        
+        try:
+            save_forensic_snapshot(model, val_loader, device, epoch + 1, config)
+        except Exception as e:
+            logger.error(f"⚠️ Forensic Snapshot Failed: {e}")
+
+        # SELF-CORRECTING LOGIC: ROLLBACK IF DEGRADED
+        # If val AUC drops more than 5% below best, reload best model and lower LR
+        if best_val_auc > 0 and val_metrics['auc'] < best_val_auc * 0.95:
+             logger.warning(f"🚨 Performance Degradation Detected! (AUC: {val_metrics['auc']:.4f} < {best_val_auc:.4f} * 0.95)")
+             logger.info("🏆 Rollback: Reloading last best weights and reducing Learning Rate...")
+             try:
+                 checkpoint_path = MODELS_DIR / "best_model_v9.pth"
+                 if checkpoint_path.exists():
+                     state_dict = torch.load(checkpoint_path, map_location=device)
+                     model.load_state_dict(state_dict)
+                     
+                     # Force LR reduction by 20%
+                     for param_group in optimizer.param_groups:
+                         param_group['lr'] *= 0.8
+                     
+                     rollback_count += 1
+                     # Update telemetry immediately
+                     try:
+                         with open(TELEMETRY_FILE, "w") as f:
+                             json.dump({"status": "ROLLBACK", "current_epoch": epoch+1, "rollback_count": rollback_count, "new_lr": optimizer.param_groups[0]['lr']}, f)
+                     except: pass
+                     
+                     logger.info(f"📉 New Learning Rate set to {optimizer.param_groups[0]['lr']:.2e}")
+                     
+                     # Skip the rest of this epoch's logic (best_val_auc remains same)
+                     continue
+             except Exception as e:
+                 logger.error(f"⚠️ Rollback failed: {e}")
+
         # Update scheduler
         scheduler.step(val_metrics['total'])
-        current_lr = optimizer.param_groups[0]['lr']
-        
         epoch_time = time.time() - epoch_start
         
         # Log
@@ -941,18 +1026,26 @@ def main():
                 current_lr
             ])
         
-        # Update telemetry
-        with open(TELEMETRY_FILE, "w") as f:
-            json.dump({
-                "current_epoch": epoch + 1,
-                "total_epochs": config.epochs,
-                "status": "TRAINING",
-                "train_loss": train_metrics['total'],
-                "val_loss": val_metrics['total'],
-                "train_auc": train_metrics['auc'],
-                "val_auc": val_metrics['auc'],
-                "device": device
-            }, f, indent=2)
+        # Update telemetry (Atomic)
+        try:
+            temp_path = f"{TELEMETRY_FILE}.tmp"
+            with open(temp_path, "w") as f:
+                json.dump({
+                    "current_epoch": epoch + 1,
+                    "total_epochs": config.epochs,
+                    "status": "TRAINING",
+                    "train_loss": train_metrics['total'],
+                    "val_loss": val_metrics['total'],
+                    "train_auc": train_metrics['auc'],
+                    "val_auc": val_metrics['auc'],
+                    "acc": val_metrics['accuracy'],
+                    "lr": optimizer.param_groups[0]['lr'],
+                    "rollback_count": rollback_count,
+                    "device": device,
+                    "memory_stats": memory.get_summary() if 'memory' in locals() else None
+                }, f, indent=2)
+            os.replace(temp_path, TELEMETRY_FILE)
+        except: pass
         
         # Update leaderboard
         is_best = leaderboard.update(

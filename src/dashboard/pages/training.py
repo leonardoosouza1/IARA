@@ -283,20 +283,16 @@ def render():
                  st.markdown("#### 🚀 Mission Progress (v9.5 LIVE)")
                  st.progress(progress, text=f"Epoch {current_epoch} / {total_epochs}")
                  
-                 
-                 col_t1, col_t2, col_t3, col_t4 = st.columns(4)
-                 col_t1.metric("Status", telemetry.get("status", "UNKNOWN"))
-                 
-                 # Handle key mismatches (train_v9 writes 'loss'/'auc', dashboard expected 'train_loss'/'val_auc')
-                 t_loss = telemetry.get('train_loss', telemetry.get('loss', 0.0))
-                 v_auc = telemetry.get('val_auc', telemetry.get('auc', 0.0))
-                 
-                 col_t2.metric("Train Loss", f"{t_loss:.4f}")
-                 col_t3.metric("Val AUC", f"{v_auc:.4f}")
-                 
+                 # Telemetry bar (Aligned with progress bar at 18 spaces)
+                 cols = st.columns(6)
+                 cols[0].metric("Epoch", f"{current_epoch} / {total_epochs}")
+                 cols[1].metric("Train Loss", f"{telemetry.get('train_loss', telemetry.get('loss', 0.0)):.4f}")
+                 cols[2].metric("Val AUC", f"{telemetry.get('val_auc', telemetry.get('auc', 0.0)):.4f}")
+                 cols[3].metric("Val Acc", f"{telemetry.get('acc', 0.0):.2%}")
+                 cols[4].metric("Self-Corrections", f"{telemetry.get('rollback_count', 0)}", help="Número de vezes que a IA detectou piora e voltou para um estado estável")
                  # Infer device if missing
                  dev = telemetry.get("device", "cuda" if torch.cuda.is_available() else "cpu")
-                 col_t4.metric("Device", dev)
+                 cols[5].metric("Device", dev)
                  
                  st.divider()
                  
@@ -309,7 +305,32 @@ def render():
                              st.warning("⚠️ Training is running but no metrics recorded yet. (Possible NaN Loss due to high Learning Rate?)")
                          else:
                              # Charts Layout
-                             tab_charts, tab_raw = st.tabs(["📊 Visual Analysis", "📄 Raw Data"])
+                             tab_charts, tab_raw, tab_memory = st.tabs(["📊 Visual Analysis", "📄 Raw Data", "🧠 AI Synaptic Memory"])
+                             
+                             with tab_memory:
+                                 stats = telemetry.get('memory_stats', {})
+                                 if not stats:
+                                     st.info("🧠 Memória ainda está sendo mapeada. Aguarde o primeiro ciclo de análise (Epoch > 1).")
+                                 else:
+                                     # 1. Memory Composition Metrics
+                                     m_col1, m_col2, m_col3 = st.columns(3)
+                                     m_col1.metric("Patterns Total", f"{stats.get('n_total', 0):,}")
+                                     m_col2.metric("Chronic (Hard)", f"{stats.get('n_chronic', 0):,}", help="Padrões que a IA está tendo dificuldade em aprender (Peso Alto)")
+                                     m_col3.metric("Mastered (Easy)", f"{stats.get('n_mastered', 0):,}", help="Padrões que a IA já decorou (Peso Baixo)")
+                                     
+                                     # 2. Synaptic Loss Distribution
+                                     st.markdown("#### 🌊 Synaptic Loss Distribution")
+                                     st.caption("Distribuição do 'esquecimento' vs 'prioridade'. Barras à direita indicam o que a IA está focando no momento.")
+                                     dist = stats.get('loss_distribution', [])
+                                     if dist:
+                                         chart_df = pd.DataFrame({
+                                             "Dificuldade": [f"{i*10}%-{(i+1)*10}%" for i in range(10)],
+                                             "Qtd Amostras": dist
+                                         })
+                                         st.bar_chart(chart_df.set_index("Dificuldade"))
+                                     
+                                     st.divider()
+                                     st.caption(f"Brain Temperature: {stats.get('mean_loss', 0.0):.4f} (Mean Loss)")
                              
                              with tab_charts:
                                  # 1. Main Loss & AUC
@@ -327,9 +348,9 @@ def render():
                                      secondary_y=True
                                  )
                                  
-                                 fig_main.update_layout(title_text="Training Dynamics (Loss vs AUC)", height=400, template="plotly_dark")
-                                 fig_main.update_yaxes(title_text="Loss", secondary_y=False)
-                                 fig_main.update_yaxes(title_text="AUC", secondary_y=True)
+                                 fig_main.update_layout(title_text="Training Dynamics (Loss vs AUC)", height=400, template="plotly_dark", hovermode='x unified')
+                                 fig_main.update_yaxes(title_text="Loss", range=[0, 1], secondary_y=False)
+                                 fig_main.update_yaxes(title_text="AUC", range=[0, 1], secondary_y=True)
                                  st.plotly_chart(fig_main, use_container_width=True)
                                  
                                  # 2. Learning Rate & Accuracy
