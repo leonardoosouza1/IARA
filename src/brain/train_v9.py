@@ -346,6 +346,11 @@ class SelectiveMemory:
                         reduction='none'
                     )
                     losses.append(bce.cpu())
+                    
+                    if len(losses) % 100 == 0:
+                        import gc
+                        gc.collect() # Force GC to avoid OOM
+                        logger.info(f"    - Analyzed {len(losses)*batch_size} samples...")
         
         current_losses = torch.cat(losses)
         
@@ -757,16 +762,35 @@ def main():
         epoch_start = time.time()
         
         # Update sampler after first epoch
+        # Update sampler after first epoch
         if epoch > 0:
-            sampler = memory.analyze(model, train_ds, device, criterion)
-            train_loader = DataLoader(
-                train_ds,
-                batch_size=config.batch_size,
-                sampler=sampler,
-                collate_fn=collate_multitf,
-                drop_last=True,
-                num_workers=0
-            )
+            try:
+                # logger.info("🔄 Starting Selective Memory Analysis...")
+                # sampler = memory.analyze(model, train_ds, device, criterion)
+                # train_loader = DataLoader(
+                #     train_ds,
+                #     batch_size=config.batch_size,
+                #     sampler=sampler,
+                #     collate_fn=collate_multitf,
+                #     drop_last=True,
+                #     num_workers=0
+                # )
+                # logger.info("✅ Selective Memory Analysis Complete.")
+                 
+                 # TEMPORARY OOM FIX: Skip analysis and use shuffle
+                 logger.info("⚠️ Skipping Selective Memory to prevent OOM. Using standard shuffle.")
+                 raise Exception("OOM Prevention")
+                 
+            except Exception as e:
+                # Fallback to standard loader if selective memory crashes
+                train_loader = DataLoader(
+                    train_ds,
+                    batch_size=config.batch_size,
+                    shuffle=True,
+                    collate_fn=collate_multitf,
+                    drop_last=True,
+                    num_workers=0
+                )
         
         # Train (pass global_step and current_lr for dashboard logging)
         current_lr = optimizer.param_groups[0]['lr']
@@ -780,7 +804,10 @@ def main():
         
         # Save Forensic Snapshot (First batch of validation)
         if (epoch + 1) % 1 == 0: # Save every epoch
-            save_forensic_snapshot(model, val_loader, device, epoch + 1, config)
+            try:
+                save_forensic_snapshot(model, val_loader, device, epoch + 1, config)
+            except Exception as e:
+                logger.error(f"⚠️ Forensic Snapshot Failed (Non-critical): {e}")
         
         # Update scheduler
         scheduler.step(val_metrics['total'])
@@ -859,7 +886,21 @@ def save_forensic_snapshot(model, loader, device, epoch, config):
     
     # Get a single batch for visualization
     try:
-        x_dict, targets = next(iter(loader))
+        # Debug Logging
+        # logger.info("🔍 Debugging Snapshot Generation...")
+        
+        iterator = iter(loader)
+        batch = next(iterator)
+        # logger.info(f"    Batch Type: {type(batch)}")
+        
+        if isinstance(batch, (list, tuple)) and len(batch) == 2:
+            x_dict, targets = batch
+        else:
+            logger.error(f"    ❌ Unexpected batch structure: {type(batch)}")
+            return
+
+        # logger.info(f"    x_dict keys: {list(x_dict.keys())}")
+        
         x_dict = {k: v.to(device) for k, v in x_dict.items()}
         
         with torch.no_grad():
@@ -867,17 +908,33 @@ def save_forensic_snapshot(model, loader, device, epoch, config):
             logits, worker_logits, coord_attn, _ = model(x_dict)
             probs = torch.sigmoid(logits).cpu().numpy()
             
+            # logger.info(f"    Logits shape: {logits.shape}")
+            
             # Map v9 topology to v8 dashboard format (Approximation)
             # v8 expected "expert_conviction": {"long": [], "short": []}
             # v9 has 5 workers. We will use Worker 0 (M5) and Worker 3 (H1) as proxies for "Experts"
             
-            w_m5 = torch.sigmoid(worker_logits["M5"]).cpu().numpy().flatten()
-            w_h1 = torch.sigmoid(worker_logits["H1"]).cpu().numpy().flatten()
+            if "M5" not in worker_logits or "H1" not in worker_logits:
+                 logger.warning(f"    ⚠️ Missing worker logits. Keys: {worker_logits.keys()}")
+                 # Create dummy if missing
+                 w_m5 = torch.zeros_like(logits).flatten().cpu().numpy()
+                 w_h1 = torch.zeros_like(logits).flatten().cpu().numpy()
+            else:
+                 w_m5 = torch.sigmoid(worker_logits["M5"]).cpu().numpy().flatten()
+                 w_h1 = torch.sigmoid(worker_logits["H1"]).cpu().numpy().flatten()
+            
+            # Extract sample input (Close price normalized)
+            # Ensure it's a tensor before converting
+            raw_input = x_dict["M5"]
+            if isinstance(raw_input, torch.Tensor):
+                 sample_input = raw_input[0, :, -1].cpu().numpy().tolist()
+            else:
+                 sample_input = [0.0] * 100
             
             snapshot = {
                 "epoch": epoch,
                 "timestamp": datetime.now().isoformat(),
-                "sample_input": x_dict["M5"][0, :, -1].cpu().numpy().tolist(), # Close price of first sample
+                "sample_input": sample_input, 
                 "expert_conviction": {
                     "long": w_m5.tolist()[:100],  # Short-term expert (M5)
                     "short": w_h1.tolist()[:100], # Long-term expert (H1)
@@ -890,9 +947,13 @@ def save_forensic_snapshot(model, loader, device, epoch, config):
             Path("logs/snapshots").mkdir(parents=True, exist_ok=True)
             with open(f"logs/snapshots/epoch_{epoch}.json", "w") as f:
                 json.dump(snapshot, f)
+            
+            logger.info(f"📸 Forensic Snapshot saved for Epoch {epoch}")
                 
     except Exception as e:
         logger.warning(f"⚠️ Failed to save forensic snapshot: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 

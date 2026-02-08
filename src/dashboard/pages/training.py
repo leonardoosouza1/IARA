@@ -6,6 +6,7 @@ import time
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import json
 import numpy as np
 
@@ -93,8 +94,15 @@ def render():
         with col1:
             st.subheader("Mission Paramters")
             epochs = st.slider("Epochs", 1, 100, 10)
-            lr = st.number_input("Learning Rate", value=0.001, format="%.5f")
-            batch_size = st.selectbox("Batch Size", [16, 32, 64, 128, 256, 512, 1024], index=1)
+            lr = st.number_input("Learning Rate", value=0.0001, format="%.5f")
+            # Batch Size Logic
+            batch_options = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, "Custom"]
+            batch_preset = st.selectbox("Batch Size", batch_options, index=3) # Default 1024
+            
+            if batch_preset == "Custom":
+                batch_size = st.number_input("Custom Batch Size", value=1024, min_value=16, step=16)
+            else:
+                batch_size = batch_preset
             device_mode = st.radio("Compute Unit", ["GPU (ROCm)", "CPU"], index=0)
             
             # Resume/Reset Logic
@@ -128,25 +136,52 @@ def render():
                 st.warning("⚪ SYSTEM IDLE")
             
             # Leaderboard Display
-            leaderboard_path = os.path.join(LOG_DIR, "leaderboard.json")
+            leaderboard_path = os.path.join(LOG_DIR, "leaderboard_v9.json")
             if os.path.exists(leaderboard_path):
                 try:
                     with open(leaderboard_path, "r") as f:
                         lb_data = json.load(f)
                     
-                    st.markdown("#### 🏆 Top Models")
+                    st.markdown("#### 🏆 Top Models (V9 Swarm)")
+                    
                     if lb_data:
-                        best = lb_data[0]
-                        b_col1, b_col2 = st.columns(2)
-                        b_col1.metric("Best Loss", f"{best['loss']:.4f}", f"Epoch {best['epoch']}")
-                        b_col2.metric("Best AUC", f"{best.get('auc', 0):.4f}", delta_color="normal")
+                        # Find best model
+                        best = sorted(lb_data, key=lambda x: x.get('auc', 0), reverse=True)[0]
                         
-                        lb_df = pd.DataFrame(lb_data)[["epoch", "loss", "accuracy", "auc", "timestamp"]]
-                        st.dataframe(lb_df, height=150, hide_index=True)
+                        b_col1, b_col2, b_col3 = st.columns([1, 1, 2])
+                        b_col1.metric("Best Loss", f"{best['loss']:.4f}", f"Epoch {best['epoch']}")
+                        b_col2.metric("Best AUC", f"{best.get('auc', 0):.4f}")
+                        
+                        if b_col3.button("🗑️ Reset Leaderboard", help="Clear all records if you suspect data leakage or want to restart."):
+                            try:
+                                os.remove(leaderboard_path)
+                                st.toast("Leaderboard reset!", icon="🗑️")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error resetting: {e}")
+                        
+                        # Formatting Table
+                        lb_df = pd.DataFrame(lb_data)
+                        if 'timestamp' in lb_df.columns:
+                            lb_df['timestamp'] = pd.to_datetime(lb_df['timestamp']).dt.strftime('%H:%M:%S %d/%m')
+                        
+                        st.dataframe(
+                            lb_df[["epoch", "loss", "accuracy", "auc", "timestamp"]].sort_values("auc", ascending=False),
+                            height=200, 
+                            hide_index=True,
+                            column_config={
+                                "epoch": "Epoch",
+                                "loss": st.column_config.NumberColumn("Loss", format="%.4f"),
+                                "accuracy": st.column_config.ProgressColumn("Accuracy", format="%.2f", min_value=0, max_value=1),
+                                "auc": st.column_config.NumberColumn("AUC", format="%.4f"),
+                                "timestamp": "Time"
+                            }
+                        )
                     else:
                         st.info("No models ranked yet.")
-                except:
-                    pass
+                except Exception as e:
+                     st.error(f"Leaderboard Error: {e}")
 
         if launch_btn:
             cmd = ["python3", TRAIN_SCRIPT, "--epochs", str(epochs), "--lr", str(lr), "--batch_size", str(batch_size)]
@@ -180,58 +215,122 @@ def render():
     # === TAB 2: LIVE MONITOR ===
     with tab_monitor:
         st.markdown("### 📡 Real-time Telemetry")
-        placeholder = st.empty()
         
-        auto_refresh = st.toggle("Auto-Refresh Monitor", value=True)
-        
-        # 📡 Live Progress section
-        if os.path.exists(TELEMETRY_FILE):
-            try:
-                with open(TELEMETRY_FILE, "r") as f:
-                    telemetry = json.load(f)
-                
-                if telemetry.get("status") == "TRAINING":
-                    curr_step = telemetry.get("current_step", 0)
-                    total_steps = telemetry.get("total_steps", 1)
-                    curr_epoch = telemetry.get("current_epoch", 0)
-                    total_epochs = telemetry.get("total_epochs", 100)
-                    
-                    st.markdown(f"#### 🚀 Mission Progress")
-                    progress = min(100, int((curr_step / total_steps) * 100))
-                    
-                    p_col1, p_col2 = st.columns([3, 1])
-                    p_col1.progress(progress / 100, text=f"Step {curr_step} / {total_steps} ({progress}%)")
-                    p_col2.metric("Epoch", f"{curr_epoch + 1}")
-                    
-                    st.divider()
-            except:
-                pass
-
+        # Refresh Controls
+        col_ref1, col_ref2 = st.columns([1, 3])
+        with col_ref1:
+            if st.button("🔄 Refresh Now"):
+                st.rerun()
+        with col_ref2:
+            auto_ref = st.toggle("Auto-Refresh (5s)", value=True)
             
-        if os.path.exists(METRICS_FILE):
-            try:
-                df = pd.read_csv(METRICS_FILE)
-                if not df.empty:
-                    col_m1, col_m2 = st.columns(2)
-                    
-                    # Loss Chart
-                    fig_loss = px.line(df, x="step", y="loss", title="Loss Convergence", template="plotly_dark")
-                    fig_loss.update_traces(line_color='#FF4B4B')
-                    col_m1.plotly_chart(fig_loss, key="loss_chart", width="stretch")
-                    
-                    # Accuracy Chart
-                    fig_acc = px.line(df, x="step", y="accuracy", title="Validation Accuracy", template="plotly_dark")
-                    fig_acc.update_traces(line_color='#00CC96')
-                    col_m2.plotly_chart(fig_acc, key="acc_chart", width="stretch")
-                    
-                    with st.expander("Show Raw Data"):
-                        st.dataframe(df.tail(10))
-                else:
-                    st.info("Waiting for telemetry data...")
-            except Exception as e:
-                st.error(f"Telemetry Error: {e}")
+        if auto_ref:
+            time.sleep(5)
+            st.rerun()
+
+        # Check telemetry
+        if not os.path.exists(TELEMETRY_FILE):
+             st.info("Waiting for telemetry data... (Start training first)")
         else:
-            st.info("No telemetry file found. Start training first.")
+             try:
+                 with open(TELEMETRY_FILE, "r") as f:
+                     telemetry = json.load(f)
+                 
+                 # Mission Progress
+                 current_epoch = telemetry.get("current_epoch", 0)
+                 total_epochs = telemetry.get("total_epochs", 100)
+                 
+                 # Progress Bar
+                 progress = min(1.0, current_epoch / max(1, total_epochs))
+                 st.markdown("#### 🚀 Mission Progress")
+                 st.progress(progress, text=f"Epoch {current_epoch} / {total_epochs}")
+                 
+                 import torch # Ensure torch is imported for device check
+                 
+                 col_t1, col_t2, col_t3, col_t4 = st.columns(4)
+                 col_t1.metric("Status", telemetry.get("status", "UNKNOWN"))
+                 
+                 # Handle key mismatches (train_v9 writes 'loss'/'auc', dashboard expected 'train_loss'/'val_auc')
+                 t_loss = telemetry.get('train_loss', telemetry.get('loss', 0.0))
+                 v_auc = telemetry.get('val_auc', telemetry.get('auc', 0.0))
+                 
+                 col_t2.metric("Train Loss", f"{t_loss:.4f}")
+                 col_t3.metric("Val AUC", f"{v_auc:.4f}")
+                 
+                 # Infer device if missing
+                 dev = telemetry.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+                 col_t4.metric("Device", dev)
+                 
+                 st.divider()
+                 
+                 # === CHARTS & HISTORY ===
+                 if os.path.exists(METRICS_FILE):
+                     try:
+                         df = pd.read_csv(METRICS_FILE)
+                         
+                         if df.empty:
+                             st.warning("⚠️ Training is running but no metrics recorded yet. (Possible NaN Loss due to high Learning Rate?)")
+                         else:
+                             # Charts Layout
+                             tab_charts, tab_raw = st.tabs(["📊 Visual Analysis", "📄 Raw Data"])
+                             
+                             with tab_charts:
+                                 # 1. Main Loss & AUC
+                                 fig_main = make_subplots(specs=[[{"secondary_y": True}]])
+                                 
+                                 # Loss (Primary Y)
+                                 fig_main.add_trace(
+                                     go.Scatter(x=df["step"], y=df["loss"], name="Train Loss", mode='lines', line=dict(color='#FF4B4B')),
+                                     secondary_y=False
+                                 )
+                                 
+                                 # AUC (Secondary Y)
+                                 fig_main.add_trace(
+                                     go.Scatter(x=df["step"], y=df["auc"], name="Train AUC", mode='lines', line=dict(color='#00CC96')),
+                                     secondary_y=True
+                                 )
+                                 
+                                 fig_main.update_layout(title_text="Training Dynamics (Loss vs AUC)", height=400, template="plotly_dark")
+                                 fig_main.update_yaxes(title_text="Loss", secondary_y=False)
+                                 fig_main.update_yaxes(title_text="AUC", secondary_y=True)
+                                 st.plotly_chart(fig_main, use_container_width=True)
+                                 
+                                 # 2. Learning Rate & Accuracy
+                                 col_c1, col_c2 = st.columns(2)
+                                 
+                                 with col_c1:
+                                     fig_lr = px.line(df, x="step", y="lr", title="Learning Rate Schedule", template="plotly_dark")
+                                     fig_lr.update_traces(line_color='#FFAA00')
+                                     st.plotly_chart(fig_lr, use_container_width=True)
+                                     
+                                 with col_c2:
+                                     fig_acc = px.line(df, x="step", y="accuracy", title="Batch Accuracy", template="plotly_dark")
+                                     fig_acc.update_traces(line_color='#0099FF')
+                                     st.plotly_chart(fig_acc, use_container_width=True)
+
+                             with tab_raw:
+                                 st.markdown("#### 📜 Recent Steps History")
+                                 st.dataframe(df.sort_values("step", ascending=False).head(50), use_container_width=True)
+                                 
+                                 csv_data = df.to_csv(index=False).encode('utf-8')
+                                 st.download_button(
+                                     label="📥 Download Full Metrics CSV",
+                                     data=csv_data,
+                                     file_name=f"training_metrics_{int(time.time())}.csv",
+                                     mime="text/csv",
+                                 )
+                             
+                     except pd.errors.EmptyDataError:
+                         st.warning("⚠️ Metrics file exists but is empty. Training might be initializing.")
+                     except Exception as e:
+                         st.error(f"Error reading metrics: {e}")
+                 else:
+                     st.info("Waiting for metrics file generation...")
+                     
+             except json.JSONDecodeError:
+                 st.caption("Syncing telemetry...")
+             except Exception as e:
+                 st.error(f"Telemetry Read Error: {e}")
 
     # === TAB 3: FORENSIC LAB ===
     with tab_forensics:
@@ -593,8 +692,5 @@ def render():
             else:
                 st.warning("Diretório do Zoo não encontrado.")
 
-    # Auto-Refresh Logic (Moved to end to prevent blocking)
-    if auto_refresh:
-        time.sleep(1)
-        st.rerun()
+
 

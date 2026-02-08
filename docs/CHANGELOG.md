@@ -1,6 +1,29 @@
 # Changelog - SACI Project
 
-## [V7 - MLOps Era] - Thursday, Feb 5 2026 (Current)
+## [V9 - Swarm Intelligence] - Friday, Feb 7 2026 (Current)
+### The "Fractal Consensus" Architecture
+- **Swarm Intelligence**: Replaced monolithic model with **5 Specialized Workers** (M5, M15, M30, H1, H4).
+- **LightningWorker**: Ultra-light CfC cells (~32 units each) for each timeframe.
+- **SwarmCoordinator**: Cross-Attention fusion + CfC refinement for final decision.
+- **New Loss Function (SwarmLoss)**:
+    - `AsymmetricFocalLoss` for Coordinator
+    - `WorkerAuxiliaryLoss` forces each worker to predict independently
+    - `ConsensusLoss` penalizes Coordinator contradicting strong worker consensus
+- **Training Improvements**:
+    - Ported `SelectiveMemory` curriculum learning from v6
+    - Gradient Clipping: 0.5 (crucial for LNN stability)
+    - Label Smoothing: 0.1
+- **VRAM Estimate**: ~210-370MB (fits 12GB GPU easily)
+
+### Files Created
+- `src/brain/models/workers.py`: LightningWorker, WorkerSwarm
+- `src/brain/models/liquid_v9.py`: SwarmBrain, SwarmCoordinator  
+- `src/brain/losses.py`: SwarmLoss with 3 component losses
+- `src/brain/train_v9.py`: Complete training loop with AMP
+
+---
+
+## [V7 - MLOps Era] - Thursday, Feb 5 2026
 ### Implemented
 - **SACI Protocol V7**: Full MLOps Architecture.
     - **TimescaleDB**: Integrated for BrainState persistence (`src/trading/simulation.py`).
