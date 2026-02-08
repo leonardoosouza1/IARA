@@ -10,21 +10,63 @@ import json
 import numpy as np
 
 # Constants
-TRAIN_SCRIPT = "src/brain/train_v8.py"
+TRAIN_SCRIPT = "src/brain/train_v9.py"  # Updated to v9 Swarm Intelligence
 LOG_DIR = "logs"
 METRICS_FILE = os.path.join(LOG_DIR, "metrics.csv")
 SNAPSHOT_DIR = os.path.join(LOG_DIR, "snapshots")
 PID_FILE = "training_process.pid"
+TELEMETRY_FILE = os.path.join(LOG_DIR, "telemetry.json")
+MODELS_DIR = os.path.join(LOG_DIR, "models")
+MODEL_ZOO_DIR = os.path.join(LOG_DIR, "model_zoo")
+
+def save_checkpoint():
+    """Send signal to training process to save checkpoint"""
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r") as f:
+                pid = int(f.read().strip())
+            os.kill(pid, signal.SIGUSR1)
+            st.toast("💾 Save signal sent!", icon="✅")
+        except Exception as e:
+            st.error(f"Failed to send save signal: {e}")
+
+def clear_logs():
+    """Clear metric logs"""
+    try:
+        if os.path.exists(METRICS_FILE): os.remove(METRICS_FILE)
+        # Also clear v9 file if exists
+        v9_metrics = os.path.join(LOG_DIR, "metrics_v9.csv")
+        if os.path.exists(v9_metrics): os.remove(v9_metrics)
+        st.toast("🧹 Logs cleared!", icon="✅")
+        time.sleep(0.5)
+        st.rerun()
+    except Exception as e:
+        st.error(f"Failed to clear logs: {e}")
 
 def is_training_running():
     if os.path.exists(PID_FILE):
         try:
             with open(PID_FILE, "r") as f:
                 pid = int(f.read().strip())
-            os.kill(pid, 0) # Check if process is alive
+            
+            # Check if process exists via signal
+            os.kill(pid, 0)
+            
+            # Check if Zombie (Linux only)
+            try:
+                with open(f"/proc/{pid}/stat", "r") as stat_file:
+                    state = stat_file.read().split()[2]
+                    if state == 'Z':
+                        # It's a zombie, cleanup
+                        os.waitpid(pid, os.WNOHANG) # Reap it
+                        os.remove(PID_FILE)
+                        return False
+            except:
+                pass # Not linux or permission error
+                
             return True
         except OSError:
-            os.remove(PID_FILE)
+            if os.path.exists(PID_FILE): os.remove(PID_FILE)
     return False
 
 def stop_training():
@@ -43,7 +85,7 @@ def render():
 
     # --- UI TABS ---
     st.title("🧪 Trinity Training Lab Pro")
-    tab_config, tab_monitor, tab_forensics = st.tabs(["⚙️ Config & Launch", "📈 Live Monitor", "🧠 Forensic Lab"])
+    tab_config, tab_monitor, tab_forensics, tab_zoo = st.tabs(["⚙️ Config & Launch", "📈 Live Monitor", "🧠 Forensic Lab", "🦁 Model Zoo"])
 
     # === TAB 1: CONFIG & LAUNCH ===
     with tab_config:
@@ -55,8 +97,27 @@ def render():
             batch_size = st.selectbox("Batch Size", [16, 32, 64, 128, 256, 512, 1024], index=1)
             device_mode = st.radio("Compute Unit", ["GPU (ROCm)", "CPU"], index=0)
             
+            # Resume/Reset Logic
+            start_mode = st.radio("Starting Point", ["Resume Training (Load Best Checkpoint)", "Start Fresh (Reset & Backup)"], index=0, help="Resume: Continues from best_model_v9.pth. Fresh: Backs up old model and starts new.")
+            
+            # Advanced Options
+            with st.expander("Advanced Configuration"):
+                disable_amp = st.checkbox("Disable Mixed Precision (AMP)", value=True, help="Check this if training hangs on ROCm")
+                debug_mode = st.checkbox("Debug Mode (Log Steps)", value=True, help="Detailed logging for diagnosis")
+            
             launch_btn = st.button("🚀 DEPLOY TRAINING MISSION", type="primary", disabled=is_training_running())
             stop_btn = st.button("🛑 ABORT MISSION", type="secondary", disabled=not is_training_running())
+            
+            # Manual Controls
+            if is_training_running():
+                save_btn = st.button("💾 SAVE CHECKPOINT", help="Force save current model state")
+                if save_btn:
+                    save_checkpoint()
+                    
+            if not is_training_running():
+                clear_logs_btn = st.button("🧹 CLEAR LOGS", help="Delete old metric logs to reset charts")
+                if clear_logs_btn:
+                    clear_logs()
 
         with col2:
             st.subheader("System Status")
@@ -91,6 +152,15 @@ def render():
             cmd = ["python3", TRAIN_SCRIPT, "--epochs", str(epochs), "--lr", str(lr), "--batch_size", str(batch_size)]
             if device_mode == "CPU":
                 cmd.append("--cpu")
+            
+            if "Resume" in start_mode:
+                cmd.append("--resume")
+            
+            if disable_amp:
+                cmd.append("--no_amp")
+                
+            if debug_mode:
+                cmd.append("--debug")
                 
             # Spawn detached process
             log_file = open("training_std.log", "w")
@@ -113,6 +183,29 @@ def render():
         placeholder = st.empty()
         
         auto_refresh = st.toggle("Auto-Refresh Monitor", value=True)
+        
+        # 📡 Live Progress section
+        if os.path.exists(TELEMETRY_FILE):
+            try:
+                with open(TELEMETRY_FILE, "r") as f:
+                    telemetry = json.load(f)
+                
+                if telemetry.get("status") == "TRAINING":
+                    curr_step = telemetry.get("current_step", 0)
+                    total_steps = telemetry.get("total_steps", 1)
+                    curr_epoch = telemetry.get("current_epoch", 0)
+                    total_epochs = telemetry.get("total_epochs", 100)
+                    
+                    st.markdown(f"#### 🚀 Mission Progress")
+                    progress = min(100, int((curr_step / total_steps) * 100))
+                    
+                    p_col1, p_col2 = st.columns([3, 1])
+                    p_col1.progress(progress / 100, text=f"Step {curr_step} / {total_steps} ({progress}%)")
+                    p_col2.metric("Epoch", f"{curr_epoch + 1}")
+                    
+                    st.divider()
+            except:
+                pass
 
             
         if os.path.exists(METRICS_FILE):
@@ -143,7 +236,7 @@ def render():
     # === TAB 3: FORENSIC LAB ===
     with tab_forensics:
         st.markdown("### 🕵️ Forensic Replay (Time Travel)")
-        st.info("Analyze the internal state of the Trinity Brain during past epochs.")
+        st.info("Analise o estado interno do Swarm Brain durante épocas passadas. Workers M5 e H1 são mapeados como \"Long\" e \"Short\" experts.")
         
         # 1. Snapshot Loader
         if not os.path.exists(SNAPSHOT_DIR):
@@ -410,6 +503,95 @@ def render():
                 spectro_fig.add_vline(x=selected_tick, line_color="yellow", line_width=2)
                 
                 st.plotly_chart(spectro_fig, key="spectrogram", width="stretch")
+
+    # === TAB 4: MODEL ZOO ===
+    with tab_zoo:
+        st.markdown("### 🦁 Model Zoo - Gerenciador de Modelos")
+        
+        col_backups, col_zoo = st.columns(2)
+        
+        # --- LEFT: Backups (logs/models) ---
+        with col_backups:
+            st.markdown("#### 📦 Backups Temporários")
+            st.caption(f"Diretório: `{MODELS_DIR}`")
+            
+            if os.path.exists(MODELS_DIR):
+                backup_files = sorted([f for f in os.listdir(MODELS_DIR) if f.endswith(".pth")], reverse=True)
+                
+                if backup_files:
+                    st.info(f"**{len(backup_files)}** modelos encontrados ({sum(os.path.getsize(os.path.join(MODELS_DIR, f)) for f in backup_files) / 1024 / 1024:.1f} MB)")
+                    
+                    # Seleção para deletar
+                    to_delete = st.multiselect("Selecione para deletar:", backup_files, key="delete_backups")
+                    
+                    col_del, col_promote = st.columns(2)
+                    
+                    if col_del.button("🗑️ Deletar Selecionados", disabled=len(to_delete) == 0, type="secondary"):
+                        for f in to_delete:
+                            try:
+                                os.remove(os.path.join(MODELS_DIR, f))
+                            except Exception as e:
+                                st.error(f"Erro ao deletar {f}: {e}")
+                        st.toast(f"Deletados {len(to_delete)} modelos!", icon="🗑️")
+                        time.sleep(0.5)
+                        st.rerun()
+                    
+                    # Promoção para Zoo
+                    to_promote = st.selectbox("Promover para Zoo:", ["-- Selecione --"] + backup_files, key="promote_model")
+                    promote_name = st.text_input("Nome no Zoo (ex: v9_auc78):", key="promote_name")
+                    
+                    if col_promote.button("🏆 Promover para Zoo", disabled=(to_promote == "-- Selecione --" or not promote_name)):
+                        src = os.path.join(MODELS_DIR, to_promote)
+                        dst = os.path.join(MODEL_ZOO_DIR, f"{promote_name}.pth")
+                        try:
+                            os.makedirs(MODEL_ZOO_DIR, exist_ok=True)
+                            import shutil
+                            shutil.copy2(src, dst)
+                            st.toast(f"Modelo promovido para Zoo como {promote_name}.pth!", icon="🏆")
+                            time.sleep(0.5)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro: {e}")
+                    
+                    # Lista com detalhes
+                    with st.expander("Ver detalhes dos backups"):
+                        for f in backup_files[:10]:
+                            fpath = os.path.join(MODELS_DIR, f)
+                            size = os.path.getsize(fpath) / 1024
+                            mtime = time.strftime("%d/%m %H:%M", time.localtime(os.path.getmtime(fpath)))
+                            st.text(f"{f} ({size:.0f} KB) - {mtime}")
+                else:
+                    st.success("Nenhum backup pendente! 🎉")
+            else:
+                st.warning("Diretório de modelos não encontrado.")
+        
+        # --- RIGHT: Zoo (logs/model_zoo) ---
+        with col_zoo:
+            st.markdown("#### 🏆 Model Zoo (Produção)")
+            st.caption(f"Diretório: `{MODEL_ZOO_DIR}`")
+            
+            if os.path.exists(MODEL_ZOO_DIR):
+                zoo_files = sorted([f for f in os.listdir(MODEL_ZOO_DIR) if f.endswith(".pth")], reverse=True)
+                
+                if zoo_files:
+                    for f in zoo_files:
+                        fpath = os.path.join(MODEL_ZOO_DIR, f)
+                        size = os.path.getsize(fpath) / 1024 / 1024
+                        mtime = time.strftime("%d/%m/%Y %H:%M", time.localtime(os.path.getmtime(fpath)))
+                        
+                        with st.container():
+                            st.markdown(f"**🦁 {f}**")
+                            st.caption(f"{size:.2f} MB | {mtime}")
+                            if st.button(f"🗑️ Remover", key=f"del_zoo_{f}"):
+                                os.remove(fpath)
+                                st.toast(f"Removido {f} do Zoo!", icon="🗑️")
+                                time.sleep(0.5)
+                                st.rerun()
+                            st.divider()
+                else:
+                    st.info("Zoo vazio. Promova modelos da esquerda!")
+            else:
+                st.warning("Diretório do Zoo não encontrado.")
 
     # Auto-Refresh Logic (Moved to end to prevent blocking)
     if auto_refresh:

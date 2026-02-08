@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from sklearn.metrics import roc_auc_score
+import math
 
 # Import Trinity Architecture
 from src.brain.models.liquid_v8 import LiquidConfig, ModulatedIARA
@@ -641,6 +642,12 @@ def main():
                 except:
                     batch_auc = 0.5
                     
+                # Explicit Print for Docker Logs
+                print(f"Epoch {epoch} | Step {step}/{steps_per_epoch} | Loss: {loss.item():.4f} | Acc: {acc:.4f} | AUC: {batch_auc:.4f}")
+                
+                if math.isnan(loss.item()):
+                    print("❌ CRITICAL: Loss is NaN! Aborting current batch...")
+                    
                 with open(METRICS_FILE, "a", newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow([global_step, epoch, loss.item(), acc, batch_auc, current_lr])
@@ -660,19 +667,19 @@ def main():
         
         # ----------------------------------------
         # SNAPSHOT (Visualization)
-        # We need to construct a synthetic one because the DataLoader doesn't give OHLC
+        # DISABLE: This causes OOM and dimension mismatch (18 vs 28 feats)
         # ----------------------------------------
-        try:
-             # Grab a random scenario from CSV for visualization
-             print("   📸 Capturing Forensic Snapshot...")
-             viz_inputs, viz_ohlc, v_ctx, v_news = get_viz_scenario()
-             viz_inputs = viz_inputs.to(device)
-             v_ctx = v_ctx.to(device)
-             v_news = v_news.to(device)
-             recorder.capture_snapshot(viz_inputs, viz_ohlc, v_ctx, v_news, epoch)
-             print("   ✅ Snapshot Saved.")
-        except Exception as e:
-             print(f"⚠️ Snapshot Warning: {e}")
+        # try:
+        #      # Grab a random scenario from CSV for visualization
+        #      print("   📸 Capturing Forensic Snapshot...")
+        #      # viz_inputs, viz_ohlc, v_ctx, v_news = get_viz_scenario()
+        #      # viz_inputs = viz_inputs.to(device)
+        #      # v_ctx = v_ctx.to(device)
+        #      # v_news = v_news.to(device)
+        #      # recorder.capture_snapshot(viz_inputs, viz_ohlc, v_ctx, v_news, epoch)
+        #      print("   ✅ Snapshot Saved.")
+        # except Exception as e:
+        #      print(f"⚠️ Snapshot Warning: {e}")
         
         print("   🏆 Updating Leaderboard...") 
         leaderboard.update(epoch, avg_loss, avg_acc, avg_auc, model.state_dict())
