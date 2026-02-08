@@ -105,6 +105,15 @@ def stop_training():
 def render():
     # Note: st.set_page_config must NOT be called here as it is set in app.py
 
+    # --- SIDEBAR CONTROLS ---
+    with st.sidebar:
+        st.header("🎮 Dashboard Controls")
+        auto_ref = st.toggle("Auto-Refresh (3s)", value=False, help="Enable for live telemetry. Disable to interact with Model Zoo reliably.")
+        if st.button("🔄 Force Refresh (Clear Cache)"):
+            st.cache_data.clear()
+            st.rerun()
+        st.divider()
+
     # --- UI TABS ---
     st.title("🧪 Trinity Training Lab Pro")
     tab_config, tab_monitor, tab_forensics, tab_zoo = st.tabs(["⚙️ Config & Launch", "📈 Live Monitor", "🧠 Forensic Lab", "🦁 Model Zoo"])
@@ -237,17 +246,8 @@ def render():
     with tab_monitor:
         st.markdown("### 📡 Real-time Telemetry")
         
-        # Refresh Controls
-        col_ref1, col_ref2 = st.columns([1, 3])
-        with col_ref1:
-            if st.button("🔄 Refresh Now (Clear Cache)"):
-                st.cache_data.clear()
-                st.rerun()
-        with col_ref2:
-            auto_ref = st.toggle("Auto-Refresh (3s)", value=True)
-            
         from datetime import datetime
-        st.caption(f"🕒 Server Time: {datetime.now().strftime('%H:%M:%S')} (If this stops, refresh browser)")
+        st.caption(f"🕒 Server Time: {datetime.now().strftime('%H:%M:%S')} (Enable Auto-Refresh in sidebar for live view)")
 
 
         # Check telemetry
@@ -676,11 +676,12 @@ def render():
                     # Logic: If name provided, use it. Else use original filename.
                     final_name = promote_name.strip() if promote_name.strip() else default_name
                     
-                    btn_disabled = (to_promote == "-- Selecione --")
-                    
-                    if st.button("🏆 Promover para Zoo", disabled=btn_disabled, type="primary"):
-                        if not final_name: 
-                            st.error("Nome inválido!")
+                    # Remove disabled state to prevent UI deadlock. Validate inside.
+                    if st.button("🏆 Promover para Zoo", type="primary", key="btn_promote_zoo"):
+                        if to_promote == "-- Selecione --":
+                            st.warning("⚠️ Selecione um modelo primeiro!")
+                        elif not final_name: 
+                            st.error("❌ Nome inválido! Tente preencher o campo.")
                         else:
                             src = os.path.join(MODELS_DIR, to_promote)
                             dst = os.path.join(MODEL_ZOO_DIR, f"{final_name}.pth")
@@ -691,11 +692,12 @@ def render():
                                     os.makedirs(MODEL_ZOO_DIR, exist_ok=True)
                                     import shutil
                                     shutil.copy2(src, dst)
-                                    st.success(f"✅ Modelo promovido para: {final_name}.pth")
+                                    st.success(f"✅ Modelo promovido com sucesso: **{final_name}.pth**")
+                                    st.toast(f"Zoo atualizado!", icon="🦁")
                                     time.sleep(1)
                                     st.rerun()
                             except Exception as e:
-                                st.error(f"Erro ao promover: {e}")
+                                st.error(f"Erro crítico ao promover: {e}")
                     
                     # Lista com detalhes
                     with st.expander("Ver detalhes dos backups"):

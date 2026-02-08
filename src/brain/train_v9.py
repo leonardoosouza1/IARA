@@ -117,6 +117,45 @@ class TrainConfig:
     patience: int = 50
 
 
+class CapturedExampleDataset(Dataset):
+    """Dataset for examples captured from backtest/simulation (Errors, Successes, Patterns)."""
+    def __init__(self, sources: List[Path], seq_len: int = 64):
+        self.seq_len = seq_len
+        self.data = []
+        for src in sources:
+            if src.exists():
+                try:
+                    loaded = torch.load(src, map_location="cpu", weights_only=False)
+                    # Support both list and dict-based captures
+                    if isinstance(loaded, list):
+                        self.data.extend(loaded)
+                    logger.info(f"🔥 Mixed {len(loaded)} examples from {src.name}")
+                except Exception as e:
+                    logger.error(f"Failed to load captured examples from {src}: {e}")
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        x_dict = item["x_dict"] 
+        processed_x = {}
+        for tf, tensor in x_dict.items():
+            # If tensor is [B, L, C], take [L, C]
+            if tensor.dim() == 3:
+                processed_x[tf] = tensor[0, :, :12].float() # Truncate to 12 features
+            else:
+                processed_x[tf] = tensor[:, :12].float() # Truncate to 12 features
+        
+        y = item["y"].float() if "y" in item else torch.tensor(0.5) # Default neutral if pattern only
+        
+        # Add placeholder forensics metadata (zeros) to match MultiTimeframeDataset structure
+        # This prevents KeyError in the collate function
+        processed_x["__ohlc__"] = torch.zeros(self.seq_len, 4)
+        
+        return processed_x, y
+
+
 class MultiTimeframeDataset(Dataset):
     """
     Dataset that provides time-aligned data for all timeframes.
@@ -195,24 +234,31 @@ class MultiTimeframeDataset(Dataset):
         # Simulate timeframe views by downsampling
         x_dict = {}
         
-        # M5: Full resolution
-        x_dict["M5"] = x[-self.seq_len:]
+        # Core features for the model (First 12)
+        x_core = x[:, :12]
         
-        # M15: Every 3rd candle (or use average pooling)
+        # M5: Full resolution
+        x_dict["M5"] = x_core[-self.seq_len:]
+        
+        # Metadata OHLC (Last 4 columns) for Forensics
+        # We only keep it for M5 to save memory
+        x_dict["__ohlc__"] = x[-self.seq_len:, 22:]
+        
+        # M15: Every 3rd candle
         step_15 = max(1, self.seq_len // 3)
-        x_dict["M15"] = x[::3][-step_15:] if self.seq_len >= 3 else x[-1:]
+        x_dict["M15"] = x_core[::3][-step_15:] if self.seq_len >= 3 else x_core[-1:]
         
         # M30: Every 6th candle
         step_30 = max(1, self.seq_len // 6)
-        x_dict["M30"] = x[::6][-step_30:] if self.seq_len >= 6 else x[-1:]
+        x_dict["M30"] = x_core[::6][-step_30:] if self.seq_len >= 6 else x_core[-1:]
         
         # H1: Every 12th candle
         step_h1 = max(1, self.seq_len // 12)
-        x_dict["H1"] = x[::12][-step_h1:] if self.seq_len >= 12 else x[-1:]
+        x_dict["H1"] = x_core[::12][-step_h1:] if self.seq_len >= 12 else x_core[-1:]
         
-        # H4: Every 48th candle (just last few)
+        # H4: Every 48th candle
         step_h4 = max(1, self.seq_len // 16)
-        x_dict["H4"] = x[::16][-step_h4:] if self.seq_len >= 16 else x[-1:]
+        x_dict["H4"] = x_core[::16][-step_h4:] if self.seq_len >= 16 else x_core[-1:]
         
         return x_dict, y
 
@@ -221,9 +267,14 @@ def collate_multitf(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]):
     """Custom collate function for multi-timeframe batches."""
     x_dicts, ys = zip(*batch)
     
+    # Only collate keys present in ALL items of the batch
+    common_keys = set(x_dicts[0].keys())
+    for x in x_dicts[1:]:
+        common_keys &= set(x.keys())
+    
     # Stack each timeframe
     x_batch = {}
-    for tf in x_dicts[0].keys():
+    for tf in sorted(list(common_keys)):
         # Get sequence lengths
         seqs = [x[tf] for x in x_dicts]
         max_len = max(s.size(0) for s in seqs)
@@ -714,9 +765,8 @@ def main():
         
         logger.info("🆕 Starting FRESH training sequence.")
     
-    # Loss function
     criterion = SwarmLoss(
-        alpha=0.75,
+        alpha=0.45,  # Balanced/Cautious (was 0.75, which over-prioritized Longs)
         gamma=2.0,
         aux_weight=config.aux_weight,
         consensus_weight=config.consensus_weight,
@@ -748,9 +798,25 @@ def main():
     # Leaderboard
     leaderboard = Leaderboard()
     
+    # Feedback Loop (Hard Examples, Successes, Patterns)
+    feedback_sources = [
+        Path("logs/backtest_errors.pt"),
+        Path("logs/backtest_success.pt"),
+        Path("logs/pattern_reservoir.pt")
+    ]
+    captured_ds = CapturedExampleDataset(feedback_sources, seq_len=config.seq_len)
+    
+    if len(captured_ds) > 0:
+        logger.info(f"🚀 Integrating {len(captured_ds)} captured examples into training set...")
+        from torch.utils.data import ConcatDataset
+        train_loader_ds = ConcatDataset([train_ds, captured_ds])
+        logger.info(f"📊 Combined dataset size: {len(train_loader_ds)}")
+    else:
+        train_loader_ds = train_ds
+
     # DataLoaders
     train_loader = DataLoader(
-        train_ds,
+        train_loader_ds,
         batch_size=config.batch_size,
         shuffle=True,
         collate_fn=collate_multitf,
@@ -945,21 +1011,26 @@ def save_forensic_snapshot(model, loader, device, epoch, config):
             # Map coordination/attention (v9 uses cross-attention weights)
             # For now, we mock the attention map if not easily extractable
             coord_attn = None 
-            if hasattr(model.coordinator, 'fusion') and hasattr(model.coordinator.fusion, 'last_attn'):
-                coord_attn = model.coordinator.fusion.last_attn
+            # Extract OHLC from metadata if available
+            ohlc_data = None
+            if "__ohlc__" in x_dict:
+                 metadata = x_dict["__ohlc__"][0].cpu().numpy() # [Seq, 4] -> [O, H, L, C]
+                 ohlc_data = {
+                     "open": metadata[:, 0].tolist(),
+                     "high": metadata[:, 1].tolist(),
+                     "low": metadata[:, 2].tolist(),
+                     "close": metadata[:, 3].tolist(),
+                     "time": list(range(len(metadata)))
+                 }
             
-            # Extract sample input (Close price normalized)
-            # Ensure it's a tensor before converting
-            raw_input = x_dict["M5"]
-            if isinstance(raw_input, torch.Tensor):
-                 sample_input = raw_input[0, :, -1].cpu().numpy().tolist()
-            else:
-                 sample_input = [0.0] * 100
+            # Extract sample input (Close price normalized or feature 0)
+            sample_input = x_dict["M5"][0, :, 0].cpu().numpy().tolist() # Feature 0 is RSI or Close (depending on config)
             
             snapshot = {
                 "epoch": epoch,
                 "timestamp": datetime.now().isoformat(),
                 "sample_input": sample_input, 
+                "ohlc": ohlc_data,
                 "expert_conviction": {
                     "long": w_m5.tolist()[:100],  # Short-term expert (M5)
                     "short": w_h1.tolist()[:100], # Long-term expert (H1)
