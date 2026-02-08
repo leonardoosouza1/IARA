@@ -85,19 +85,17 @@ LEADERBOARD_FILE = LOG_DIR / "leaderboard_v9.json"
 class TrainConfig:
     """Training configuration for v9."""
     # Data
-    seq_len: int = 64
-    batch_size: int = 64
+    seq_len: int = 128
+    batch_size: int = 256
     val_split: float = 0.2
     
     # Model
     input_dim: int = 12
-    worker_hidden: int = 32
-    coord_hidden: int = 128
+    worker_hidden: int = 64
+    coord_hidden: int = 256
     
     # Training
     epochs: int = 200
-    learning_rate: float = 0.0005
-    weight_decay: float = 1e-4
     learning_rate: float = 0.0005
     weight_decay: float = 1e-4
     grad_clip: float = 0.5
@@ -711,8 +709,10 @@ def main():
     parser.add_argument("--lr", type=float, default=0.0005)
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--seq_len", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--seq_len", type=int, default=128)
+    parser.add_argument("--worker_hidden", type=int, default=64)
+    parser.add_argument("--coord_hidden", type=int, default=256)
     parser.add_argument("--cpu", action="store_true", default=False)
     parser.add_argument("--no_amp", action="store_true", default=False, help="Disable Mixed Precision")
     parser.add_argument("--debug", action="store_true", default=False, help="Log every step")
@@ -757,6 +757,8 @@ def main():
     config = TrainConfig(
         seq_len=args.seq_len,
         batch_size=args.batch_size,
+        worker_hidden=args.worker_hidden,
+        coord_hidden=args.coord_hidden,
         learning_rate=args.lr,
         epochs=args.epochs,
         patience=args.patience,

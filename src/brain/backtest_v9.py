@@ -220,6 +220,9 @@ def main():
         default=False,
         help="Disable real-time sleeping (useful for automated loops)",
     )
+    parser.add_argument("--worker_hidden", type=int, default=64)
+    parser.add_argument("--coord_hidden", type=int, default=256)
+    parser.add_argument("--seq_len", type=int, default=128)
     args = parser.parse_args()
 
     def decide_by_consensus(
@@ -328,8 +331,10 @@ def main():
         logger.info(f"🧩 Checkpoint expects input_dim={ckpt_input_dim}")
 
         # Config (Match checkpoint input dimension)
-        worker_cfg = WorkerConfig(input_dim=ckpt_input_dim, hidden_dim=32)
-        coord_cfg = CoordinatorConfig(num_workers=5, worker_dim=32, hidden_dim=128)
+        worker_cfg = WorkerConfig(input_dim=ckpt_input_dim, hidden_dim=args.worker_hidden)
+        coord_cfg = CoordinatorConfig(
+            num_workers=5, worker_dim=args.worker_hidden, hidden_dim=args.coord_hidden
+        )
         model = SwarmBrain(worker_cfg, coord_cfg).to(device)
 
         model.load_state_dict(checkpoint, strict=False)
@@ -363,7 +368,7 @@ def main():
         last_exit_time = None
         trade_count = 0
         last_save_time = 0
-        seq_len = 64
+        seq_len = args.seq_len
 
         COMMAND_FILE = "logs/sim_command.json"
         if os.path.exists(COMMAND_FILE):

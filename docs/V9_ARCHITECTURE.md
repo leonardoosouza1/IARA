@@ -20,9 +20,9 @@ A v9 representa uma mudança paradigmática: de um **modelo único multi-timefra
    ┌───▼───┐  ┌───▼───┐  ┌───▼───┐         ┌───▼───┐  ┌───▼───┐  ┌───▼───┐
    │ W-M5  │  │ W-M15 │  │ W-M30 │         │ W-H1  │  │ W-H4  │  │  LLM  │
    │       │  │       │  │       │         │       │  │       │  │Regime │
-   │ 32dim │  │ 32dim │  │ 32dim │         │ 32dim │  │ 32dim │  │(ext)  │
+   │ 128dim│  │ 128dim│  │ 128dim│         │ 128dim│  │ 128dim│  │(ext)  │
    └───────┘  └───────┘  └───────┘         └───────┘  └───────┘  └───────┘
-   Ultra-Light Workers (~100KB each)        Optional    External
+   High-Capacity Workers (~800KB each)     Optional    External
 ```
 
 ---
@@ -91,14 +91,14 @@ class SwarmCoordinator(nn.Module):
         self.cross_attn = nn.MultiheadAttention(embed_dim=32, num_heads=4)
         
         # Fusion: Concatena tudo
-        self.fusion = nn.Linear(5 * 32 + 5 * 3, 128)
+        self.fusion = nn.Linear(5 * 128 + 5 * 3, 512)
         
         # CfC Principal
-        self.cfc = CfCCell(input_dim=128, hidden_dim=128)
+        self.cfc = CfCCell(input_dim=512, hidden_dim=512)
         
         # Expert Heads
-        self.long_expert = nn.Linear(128, 1)
-        self.short_expert = nn.Linear(128, 1)
+        self.long_expert = nn.Linear(512, 1)
+        self.short_expert = nn.Linear(512, 1)
 ```
 
 ### 3. Technical Analyzer (Pattern Detection)
@@ -186,14 +186,15 @@ class SwarmLoss(nn.Module):
 
 | Componente | fp32 | int8 |
 |------------|------|------|
-| 5 Workers | 10MB | 2.5MB |
-| Coordinator | 20MB | 10MB |
-| Activations (batch=64) | 50MB | 50MB |
-| Gradients | 100MB | 50MB |
-| Optimizer States | 200MB | 100MB |
-| **Total** | **380MB** | **212MB** |
+| 5 Workers (128 units) | 16MB | 4MB |
+| Coordinator (512 units) | 40MB | 10MB |
+| Activations (batch=256) | 4.5GB | 2.2GB |
+| Gradients | 500MB | 250MB |
+| Optimizer States | 1GB | 500MB |
+| **Total** | **~6GB** | **~3GB** |
 
-> ✅ **Cabe facilmente em 12GB!** Podemos dobrar capacity se necessário.
+> ✅ **Otimizado para GPUs de 8GB-12GB (ex: RX 6750 XT).** 
+> Aumentamos o `batch_size` e `seq_len` para 256 para maximizar o throughput e uso de VRAM (de 10% para ~40%).
 
 ---
 

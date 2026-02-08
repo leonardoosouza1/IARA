@@ -35,8 +35,8 @@ def _is_better_than_previous(
 ) -> bool:
     """Determine if current cycle is better than previous for model promotion."""
     if previous is None:
-        # First cycle: promote if profitable with minimum trades
-        return current["realized_pnl"] > 0 and current["total_trades"] >= min_trades
+        # First cycle: always promote to establish a baseline
+        return True
 
     # Must have minimum trades to be statistically significant
     if current["total_trades"] < min_trades:
@@ -95,6 +95,12 @@ def main() -> None:
         type=int,
         default=None,
         help="Early stopping patience for training (defaults to max(5, train_epochs//2))",
+    )
+    parser.add_argument(
+        "--train_worker_hidden", type=int, default=64, help="Worker hidden dim"
+    )
+    parser.add_argument(
+        "--train_coord_hidden", type=int, default=256, help="Coordinator hidden dim"
     )
     parser.add_argument(
         "--resume",
@@ -179,6 +185,10 @@ def main() -> None:
             str(args.train_batch_size),
             "--seq_len",
             str(args.train_seq_len),
+            "--worker_hidden",
+            str(args.train_worker_hidden),
+            "--coord_hidden",
+            str(args.train_coord_hidden),
         ]
         patience = args.train_patience
         if patience is None:
@@ -217,6 +227,12 @@ def main() -> None:
             str(args.backtest_max_steps),
             "--report_path",
             str(report_path),
+            "--worker_hidden",
+            str(args.train_worker_hidden),
+            "--coord_hidden",
+            str(args.train_coord_hidden),
+            "--seq_len",
+            str(args.train_seq_len),
             "--no_sleep",
         ]
         if args.backtest_end_date:
@@ -263,7 +279,7 @@ def main() -> None:
                             f"[Cycle {cycle}] Model REJECTED - Rolling back to {rollback_to.name}"
                         )
                         print(
-                            f"  Current PnL: ${current_metrics['realized_pnl']:.2f} vs Previous: ${previous_metrics['realized_pnl']:.2f if previous_metrics else 0:.2f}"
+                            f"  Current PnL: ${current_metrics['realized_pnl']:.2f} vs Previous: ${previous_metrics['realized_pnl']:.2f}"
                         )
                     else:
                         print(
