@@ -271,11 +271,16 @@ class SwarmLoss(nn.Module):
         # 2. Natural Dynamic Weighting (Softmax)
         weights = F.softmax(self.weight_logits, dim=0)
         
+        # 3. Anchor Mechanism: Ensure Coordinator (Líder) always has strong voice
+        # We enforce a minimum presence (e.g., mixing with a static anchor)
+        # This prevents the weight from falling to zero if other tasks are "easier"
+        coord_weight = 0.5 * weights[0] + 0.3 # At least 30%, up to 80%
+        
         # Total Weighted Loss
         total_l = (
-            weights[0] * l_coord + 
-            weights[1] * l_workers * 0.5 + # Worker loss is naturally higher, scale it down
-            weights[2] * l_consensus
+            coord_weight * l_coord + 
+            weights[1] * l_workers * 0.4 + # Worker signal is noisy, keep it low
+            weights[2] * l_consensus * 0.1 # Weight consensus but don't let it dominate
         )
         
         return {
@@ -283,7 +288,7 @@ class SwarmLoss(nn.Module):
             "coord": l_coord,
             "workers": l_workers,
             "consensus": l_consensus,
-            "weights": weights.tolist()
+            "weights": [coord_weight.item(), weights[1].item(), weights[2].item()]
         }
 
 
