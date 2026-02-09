@@ -454,18 +454,18 @@ class SelectiveMemory:
         self.mastered_counter[indices_tensor[~low_loss]] = 0
         
         # Compute weights for WHOLE dataset
-        # Exponent 1.5 instead of 2.0 for smoother curriculum (less aggressive)
-        weights = (self.sample_loss_ema + 0.05) ** 1.5
+        # Exponent 1.0 instead of 1.5 for linear priority (tempered Importance Sampling)
+        weights = (self.sample_loss_ema + 0.05) ** 1.0
         
-        # Boost chronic - Threshold 2 instead of 3 to react faster
-        weights[self.chronic_counter >= 2] *= 3.0
+        # Boost chronic - Lowered from 3.0 to 2.0 to be less aggressive with noise
+        weights[self.chronic_counter >= 2] *= 2.0
         
         # Suppress mastered
         weights[self.mastered_counter >= 5] *= 0.1
         
-        # Boost Captured (Human Feedback)
+        # Boost Captured (Human Feedback) - Lowered from 5.0 to 2.0 to avoid noise dominance
         if captured_indices is not None:
-             weights[list(captured_indices)] *= 5.0
+             weights[list(captured_indices)] *= 2.0
         
         # 10% Diversity Mix (Random Background)
         # Adds a baseline weight to all samples to prevent catastrophic forgetting
@@ -525,7 +525,7 @@ def train_epoch(
     """Train one epoch."""
     model.train()
     
-    losses = {"total": [], "coord": [], "workers": [], "consensus": []}
+    losses = {"total": [], "coord": [], "workers": [], "consensus": [], "weights": []}
     all_preds, all_targets = [], []
     
     for step, (x_dict, targets) in enumerate(loader):
@@ -560,8 +560,9 @@ def train_epoch(
         scaler.update()
         
         # Track losses
-        for key in losses:
+        for key in ["total", "coord", "workers", "consensus"]:
             losses[key].append(loss_dict[key].item())
+        losses["weights"].append(loss_dict["weights"])
         
         # Track predictions
         probs = torch.sigmoid(logits.detach()).cpu().numpy()
@@ -646,7 +647,11 @@ def train_epoch(
         global_step += 1
     
     # Compute metrics
-    avg_losses = {k: np.mean(v) if v else 0.0 for k, v in losses.items()}
+    avg_losses = {k: np.mean(v) if v else 0.0 for k, v in losses.items() if k != "weights"}
+    if losses["weights"]:
+        avg_losses["weights"] = np.mean(losses["weights"], axis=0).tolist()
+    else:
+        avg_losses["weights"] = [0.0, 0.0, 0.0]
     
     try:
         auc = roc_auc_score(all_targets, all_preds)
@@ -670,7 +675,7 @@ def validate(
     """Validate model."""
     model.eval()
     
-    losses = {"total": [], "coord": [], "workers": [], "consensus": []}
+    losses = {"total": [], "coord": [], "workers": [], "consensus": [], "weights": []}
     all_preds, all_targets = [], []
     
     with torch.no_grad():
@@ -682,14 +687,19 @@ def validate(
                 logits, worker_logits, _, _ = model(x_dict)
                 loss_dict = criterion(logits, worker_logits, targets)
                 
-                for key in losses:
+                for key in ["total", "coord", "workers", "consensus"]:
                     losses[key].append(loss_dict[key].item())
+                losses["weights"].append(loss_dict["weights"])
                 
                 probs = torch.sigmoid(logits).cpu().numpy()
                 all_preds.extend(probs.flatten())
                 all_targets.extend((targets > 0.5).float().cpu().numpy().flatten())
     
-    avg_losses = {k: np.mean(v) if v else 0.0 for k, v in losses.items()}
+    avg_losses = {k: np.mean(v) if v else 0.0 for k, v in losses.items() if k != "weights"}
+    if losses["weights"]:
+        avg_losses["weights"] = np.mean(losses["weights"], axis=0).tolist()
+    else:
+        avg_losses["weights"] = [0.0, 0.0, 0.0]
     
     try:
         auc = roc_auc_score(all_targets, all_preds)
@@ -838,14 +848,15 @@ def main():
     criterion = SwarmLoss(
         alpha=0.45,  # Balanced/Cautious (was 0.75, which over-prioritized Longs)
         gamma=2.0,
-        aux_weight=config.aux_weight,
         consensus_weight=config.consensus_weight,
         label_smoothing=config.label_smoothing
-    )
+    ).to(device)
     
-    # Optimizer
+    # Optimizer (Now includes model AND criterion parameters for Dynamic Uncertainty)
+    # We use full LR to allow faster adaptation of loss weights
+    params = list(model.parameters()) + list(criterion.parameters())
     optimizer = optim.AdamW(
-        model.parameters(),
+        params,
         lr=config.learning_rate,
         weight_decay=config.weight_decay
     )
@@ -1009,6 +1020,7 @@ def main():
             f"Epoch {epoch + 1}/{config.epochs} | Time: {epoch_time:.1f}s\n"
             f"  Train - Loss: {train_metrics['total']:.4f} | AUC: {train_metrics['auc']:.4f} | Acc: {train_metrics['accuracy']:.2%}\n"
             f"  Val   - Loss: {val_metrics['total']:.4f} | AUC: {val_metrics['auc']:.4f} | Acc: {val_metrics['accuracy']:.2%}\n"
+            f"  Weights (Dynamic) - Coord: {train_metrics['weights'][0]:.2f} | Workers: {train_metrics['weights'][1]:.2f} | Consensus: {train_metrics['weights'][2]:.2f}\n"
             f"  LR: {current_lr:.2e}"
         )
         logger.info(f"{'='*60}\n")

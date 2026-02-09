@@ -84,7 +84,7 @@ class ConsensusFusion(nn.Module):
         self, 
         num_workers: int, 
         worker_dim: int, 
-        num_classes: int = 3,
+        num_classes: int = 2,
         hidden_dim: int = 128
     ):
         super().__init__()
@@ -131,7 +131,7 @@ class ConsensusFusion(nn.Module):
         attended = self.cross_attn(embeddings)  # [batch, workers, dim]
         
         # 2. Confidence scores from logits (max probability = confidence)
-        probs = F.softmax(logits, dim=-1)  # [batch, workers, 3]
+        probs = F.softmax(logits, dim=-1)  # [batch, workers, 2]
         confidence = self.confidence_proj(probs)  # [batch, workers, 1]
         confidence = torch.sigmoid(confidence)  # Normalize to [0, 1]
         
@@ -169,7 +169,7 @@ class SwarmCoordinator(nn.Module):
         
         self.config = config
         
-        # Consensus fusion module
+        # Consensus fusion module (Synchronized with 3-class worker output)
         self.fusion = ConsensusFusion(
             num_workers=config.num_workers,
             worker_dim=config.worker_dim,
@@ -322,7 +322,7 @@ class SwarmBrain(nn.Module):
         Analyze worker voting pattern.
         
         Args:
-            worker_logits: [batch, num_workers, 3]
+            worker_logits: [batch, num_workers, 2]
             
         Returns:
             Dictionary with vote counts and agreement score
@@ -330,19 +330,17 @@ class SwarmBrain(nn.Module):
         # Get predictions per worker
         votes = worker_logits.argmax(dim=-1)  # [batch, workers]
         
-        # Count votes (0=LONG, 1=SHORT, 2=NEUTRAL)
+        # Count votes (0=LONG, 1=SHORT)
         n_long = (votes == 0).float().sum(dim=-1)
         n_short = (votes == 1).float().sum(dim=-1)
-        n_neutral = (votes == 2).float().sum(dim=-1)
         
         # Agreement score (how much workers agree)
-        max_votes = torch.stack([n_long, n_short, n_neutral], dim=-1).max(dim=-1).values
+        max_votes = torch.stack([n_long, n_short], dim=-1).max(dim=-1).values
         agreement = max_votes / self.swarm.num_workers
         
         return {
             "n_long": n_long,
             "n_short": n_short,
-            "n_neutral": n_neutral,
             "agreement": agreement
         }
 

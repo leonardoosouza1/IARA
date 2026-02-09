@@ -9,8 +9,12 @@ from pathlib import Path
 import torch
 
 
-def _run(cmd: list[str], cwd: str | None = None) -> None:
-    subprocess.run(cmd, cwd=cwd, check=True)
+def _run(cmd: list[str], cwd: str | None = None, log_file: Path | None = None) -> None:
+    if log_file:
+        with open(log_file, "w") as f:
+            subprocess.run(cmd, cwd=cwd, check=True, stdout=f, stderr=subprocess.STDOUT)
+    else:
+        subprocess.run(cmd, cwd=cwd, check=True)
 
 
 def _load_backtest_metrics(report_path: Path) -> dict:
@@ -201,7 +205,7 @@ def main() -> None:
             train_cmd.append("--no_amp")
 
         t0 = time.time()
-        _run(train_cmd, cwd=project_root)
+        _run(train_cmd, cwd=project_root, log_file=cycle_dir / "train.log")
         train_s = time.time() - t0
 
         if not model_path.exists():
@@ -239,7 +243,7 @@ def main() -> None:
             backtest_cmd.extend(["--end_date", args.backtest_end_date])
 
         t1 = time.time()
-        _run(backtest_cmd, cwd=project_root)
+        _run(backtest_cmd, cwd=project_root, log_file=cycle_dir / "backtest.log")
         backtest_s = time.time() - t1
 
         # 3) GATING: Evaluate and decide on model promotion

@@ -247,17 +247,17 @@ def main():
 
         coord_prob = torch.sigmoid(coord_logit.view(-1))[0].item()
 
-        if n_wait >= 3:
+        if n_wait >= 4:
             return "WAIT"
 
-        if coord_prob > 0.6 and n_long >= 3:
+        if coord_prob > 0.55 and n_long >= 2:
             return "LONG"
-        if coord_prob < 0.4 and n_short >= 3:
+        if coord_prob < 0.45 and n_short >= 2:
             return "SHORT"
 
-        if coord_prob > 0.7:
+        if coord_prob > 0.65:
             return "LONG"
-        if coord_prob < 0.3:
+        if coord_prob < 0.35:
             return "SHORT"
 
         return "WAIT"
@@ -578,7 +578,7 @@ def main():
                     # Capture Metadata for training
                     taken_label = 1 if LAST_ENTRY_STATE["action"] == "BUY" else 0
 
-                    if pnl_final < 0:
+                    if pnl_final < -0.5: # Only capture significant mistakes (at least 0.5 pips)
                         # ERROR: Target should have been the OPPOSITE of what we did
                         target_label = 1 - taken_label
                         item = {

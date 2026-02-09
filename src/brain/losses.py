@@ -103,7 +103,7 @@ class WorkerAuxiliaryLoss(nn.Module):
     Uses label smoothing for regularization.
     """
     
-    def __init__(self, num_classes: int = 3, label_smoothing: float = 0.1):
+    def __init__(self, num_classes: int = 2, label_smoothing: float = 0.1):
         super().__init__()
         self.num_classes = num_classes
         self.label_smoothing = label_smoothing
@@ -115,7 +115,7 @@ class WorkerAuxiliaryLoss(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            worker_logits: All worker predictions [batch, num_workers, num_classes]
+            worker_logits: All worker predictions [batch, num_workers, 2]
             targets: Binary targets [batch] (0=SHORT, 1=LONG)
             
         Returns:
@@ -123,18 +123,13 @@ class WorkerAuxiliaryLoss(nn.Module):
         """
         batch_size, num_workers, num_classes = worker_logits.shape
         
-        # Convert binary target to 3-class
-        # 0 -> SHORT (class 1)
-        # 1 -> LONG (class 0)
-        # We treat NEUTRAL (class 2) as never being the target
-        worker_targets = torch.zeros(batch_size, dtype=torch.long, device=targets.device)
-        worker_targets[targets > 0.5] = 0  # LONG
-        worker_targets[targets <= 0.5] = 1  # SHORT
+        # Convert targets to binary long
+        worker_targets = (targets > 0.5).long() # [batch]
         
         total_loss = torch.tensor(0.0, device=targets.device)
         
         for w in range(num_workers):
-            w_logits = worker_logits[:, w, :]  # [batch, 3]
+            w_logits = worker_logits[:, w, :]  # Pure binary (0, 1)
             loss = F.cross_entropy(
                 w_logits, 
                 worker_targets,
@@ -239,14 +234,15 @@ class SwarmLoss(nn.Module):
         self,
         alpha: float = 0.75,
         gamma: float = 2.0,
-        aux_weight: float = 0.4,
         consensus_weight: float = 0.1,
         label_smoothing: float = 0.1
     ):
         super().__init__()
         
-        self.aux_weight = aux_weight
-        self.consensus_weight = consensus_weight
+        # Learnable weight logits (Natural Dynamic Weighting)
+        # Softmax of this tensor determines final weights.
+        # Initialized to favor Coordinator (Index 0) at approx 85%
+        self.weight_logits = nn.Parameter(torch.tensor([2.5, 0.0, 0.0]))
         
         # Sub-losses
         self.coord_loss = AsymmetricFocalLoss(alpha=alpha, gamma=gamma)
@@ -264,38 +260,30 @@ class SwarmLoss(nn.Module):
         weight: Optional[torch.Tensor] = None
     ) -> dict:
         """
-        Compute all losses.
-        
-        Args:
-            coord_logits: Coordinator predictions [batch, 1]
-            worker_logits: Worker predictions [batch, num_workers, 3]
-            targets: Binary targets [batch]
-            weight: Optional per-sample weights [batch]
-            
-        Returns:
-            Dictionary with:
-            - total: Combined loss (for backward)
-            - coord: Coordinator loss (for logging)
-            - workers: Workers auxiliary loss (for logging)
-            - consensus: Consensus regularization (for logging)
+        Compute all losses with automatic Natural Scaling.
+        Weights always sum to 1.0, keeping Loss in the 0.0 - 1.0 range.
         """
-        # 1. Main loss (Coordinator)
+        # 1. Compute individual losses
         l_coord = self.coord_loss(coord_logits, targets, weight)
-        
-        # 2. Auxiliary loss (Workers)
         l_workers = self.worker_loss(worker_logits, targets)
-        
-        # 3. Consensus regularization
         l_consensus = self.consensus_loss(coord_logits, worker_logits)
         
-        # Total
-        total = l_coord + self.aux_weight * l_workers + self.consensus_weight * l_consensus
+        # 2. Natural Dynamic Weighting (Softmax)
+        weights = F.softmax(self.weight_logits, dim=0)
+        
+        # Total Weighted Loss
+        total_l = (
+            weights[0] * l_coord + 
+            weights[1] * l_workers * 0.5 + # Worker loss is naturally higher, scale it down
+            weights[2] * l_consensus
+        )
         
         return {
-            "total": total,
+            "total": total_l,
             "coord": l_coord,
             "workers": l_workers,
-            "consensus": l_consensus
+            "consensus": l_consensus,
+            "weights": weights.tolist()
         }
 
 
