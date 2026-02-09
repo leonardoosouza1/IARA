@@ -25,7 +25,7 @@ import torch.nn.functional as F
 class WorkerConfig:
     """Configuration for LightningWorker."""
     input_dim: int = 12
-    hidden_dim: int = 32
+    hidden_dim: int = 64  # Doubled from 32 for higher SNR capacity
     num_classes: int = 3  # LONG, SHORT, NEUTRAL
     dropout: float = 0.1
     use_layer_norm: bool = True
@@ -52,12 +52,18 @@ class CfCCell(nn.Module):
         self.layer_norm = nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, x: torch.Tensor, hx: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        dt: Optional[torch.Tensor] = None,
+        hx: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Process sequence through CfC dynamics.
         
         Args:
             x: Input tensor [batch, seq_len, input_dim]
+            dt: Optional time deltas [batch, seq_len, 1]
             hx: Optional initial hidden state [batch, hidden_dim]
             
         Returns:
@@ -70,6 +76,10 @@ class CfCCell(nn.Module):
         
         if hx is None:
             hx = torch.zeros(batch_size, self.hidden_dim, device=device, dtype=dtype)
+        
+        # Default dt to 1.0 if not provided
+        if dt is None:
+            dt = torch.ones(batch_size, seq_len, 1, device=device, dtype=dtype)
         
         outputs = []
         h_t = hx
@@ -90,8 +100,10 @@ class CfCCell(nn.Module):
             h_cand = self.dropout(h_cand)
             gate = torch.tanh(gate_logits)
             
-            # Update rule: h_new = h + gate * (candidate - h)
-            h_t = h_t + gate * (h_cand - h_t)
+            # Update rule: h_new = h + (gate * dt_t) * (candidate - h)
+            # This is the Time-Aware CfC core: dt modulates the gate speed
+            dt_t = dt[:, t, :]
+            h_t = h_t + (gate * dt_t) * (h_cand - h_t)
             
             # Stability: Normalize and clip
             h_t = self.layer_norm(h_t)
@@ -136,6 +148,9 @@ class LightningWorker(nn.Module):
             dropout=config.dropout
         )
         
+        # Residual Skip-Connection projection (if input_dim != hidden_dim)
+        self.residual_proj = nn.Linear(config.input_dim, config.hidden_dim) if config.input_dim != config.hidden_dim else nn.Identity()
+        
         # Classification head for auxiliary loss
         self.head = nn.Sequential(
             nn.Linear(config.hidden_dim, config.hidden_dim // 2),
@@ -157,6 +172,7 @@ class LightningWorker(nn.Module):
     def forward(
         self, 
         x: torch.Tensor, 
+        dt: Optional[torch.Tensor] = None,
         hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -164,20 +180,27 @@ class LightningWorker(nn.Module):
         
         Args:
             x: Input features [batch, seq_len, input_dim]
+            dt: Optional time deltas [batch, seq_len, 1]
             hx: Optional initial hidden state
             
         Returns:
             embedding: Final hidden state for Coordinator [batch, hidden_dim]
             logits: Class predictions for Auxiliary Loss [batch, num_classes]
         """
+        # Save for residual
+        residual = self.residual_proj(x)
+        
         # Project input
-        x = self.input_proj(x)
+        x_proj = self.input_proj(x)
         
-        # Process through CfC
-        output, h_n = self.backbone(x, hx)
+        # CfC backbone with Time-Awareness
+        _, h_t = self.backbone(x_proj, dt, hx)
         
-        # Embedding is the final hidden state
-        embedding = h_n
+        # Skip-Connection (add projection of last step)
+        h_t = h_t + residual[:, -1, :]
+        
+        # Embedding is the final hidden state after skip connection
+        embedding = h_t
         
         # Logits for auxiliary loss (LONG=0, SHORT=1, NEUTRAL=2)
         logits = self.head(embedding)
@@ -237,7 +260,10 @@ class WorkerSwarm(nn.Module):
         
         for tf in self.TIMEFRAMES:
             if tf in x_dict:
-                emb, logits = self.workers[tf](x_dict[tf])
+                # Extract dt if available, else None
+                dt = x_dict.get(f"{tf}_dt")
+                
+                emb, logits = self.workers[tf](x_dict[tf], dt=dt)
                 embeddings.append(emb.unsqueeze(1))
                 all_logits.append(logits.unsqueeze(1))
                 order.append(tf)

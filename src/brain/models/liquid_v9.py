@@ -217,12 +217,14 @@ class SwarmCoordinator(nn.Module):
         self, 
         embeddings: torch.Tensor, 
         worker_logits: torch.Tensor,
+        dt: Optional[torch.Tensor] = None,
         hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             embeddings: Worker embeddings [batch, num_workers, worker_dim]
             worker_logits: Worker predictions [batch, num_workers, 3]
+            dt: Optional time deltas [batch, 1, 1]
             hx: Optional hidden state for CfC
             
         Returns:
@@ -235,7 +237,7 @@ class SwarmCoordinator(nn.Module):
         
         # 2. Refine through CfC (treat context as single-step sequence)
         context_seq = context.unsqueeze(1)  # [batch, 1, hidden]
-        _, h_refined = self.cfc(context_seq, hx)  # [batch, hidden]
+        _, h_refined = self.cfc(context_seq, dt, hx)  # [batch, hidden]
         
         # 3. Expert heads
         long_score = self.long_expert(h_refined)
@@ -308,8 +310,10 @@ class SwarmBrain(nn.Module):
         embeddings, worker_logits, _ = self.swarm(x_dict)
         
         # 2. Coordinate and decide
+        # We can pass an optional coordinator-level dt if available
+        coord_dt = x_dict.get("coord_dt")
         logits, long_score, short_score = self.coordinator(
-            embeddings, worker_logits, hx
+            embeddings, worker_logits, coord_dt, hx
         )
         
         return logits, worker_logits, long_score, short_score
