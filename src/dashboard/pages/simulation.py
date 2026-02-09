@@ -13,7 +13,8 @@ import torch
 # Constants
 LOG_DIR = "logs"
 ZOO_DIR = os.path.join(LOG_DIR, "model_zoo")
-SIM_DATA = "data/processed/EURUSD.parquet"
+MODELS_DIR = os.path.join(LOG_DIR, "models")
+DATA_DIR = "data/processed"
 SIM_SCRIPT = "src/brain/backtest_v9.py"
 SIM_SNAPSHOT_FILE = os.path.join(LOG_DIR, "sim_snapshot.json")
 SIM_PID_FILE = "simulation_process.pid"
@@ -48,23 +49,43 @@ def render():
     with st.sidebar:
         st.header("🎮 Game Controls")
         
-        # Model Selector
-        models = [f for f in os.listdir(ZOO_DIR) if f.endswith(".pth")] if os.path.exists(ZOO_DIR) else []
-        selected_model = st.selectbox("Select Brain", models, disabled=running)
+        # Asset (Symbol) Selector
+        available_assets = [f.replace(".parquet", "") for f in os.listdir(DATA_DIR) if f.endswith(".parquet")] if os.path.exists(DATA_DIR) else ["EURUSD"]
+        selected_asset = st.selectbox("Select Asset (Symbol)", available_assets, disabled=running)
+        sim_data_path = os.path.join(DATA_DIR, f"{selected_asset}.parquet")
+        
+        # Model Selector (Filter by Asset)
+        models_zoo = [os.path.join("model_zoo", f) for f in os.listdir(ZOO_DIR) if f.endswith(".pth")] if os.path.exists(ZOO_DIR) else []
+        models_promoted = [os.path.join("models", f) for f in os.listdir(MODELS_DIR) if f.endswith(".pth")] if os.path.exists(MODELS_DIR) else []
+        
+        # Smart Filter: Show models for selected asset OR general models
+        filtered_models = [m for m in (models_zoo + models_promoted) if selected_asset in m or "v9" in m]
+        # If no asset-specific model found, show all
+        if not filtered_models:
+             filtered_models = models_zoo + models_promoted
+             
+        selected_model = st.selectbox("Select Brain", filtered_models, disabled=running)
         
         # Data Config
         start_date = st.text_input("Start Date (YYYY-MM-DD)", "2023-01-01", disabled=running)
         
         # Speed
-        speed = st.slider("Playback Speed (Steps/Sec)", 1, 100, 10, disabled=running)
+        speed = st.slider("Playback Speed (Steps/Sec)", 1, 100, 25, disabled=running)
+        
+        st.divider()
+        st.subheader("🧠 Architecture (V10 Boost)")
+        # Architecture Config (Match Cycle 01 results)
+        w_hidden = st.number_input("Worker Hidden Dim", value=128, step=32, disabled=running)
+        c_hidden = st.number_input("Coord Hidden Dim", value=512, step=128, disabled=running)
+        s_len = st.number_input("Sequence Length", value=128, step=64, disabled=running)
         
         if not running:
             if st.button("🚀 START SIMULATION", type="primary"):
                 if not selected_model:
                      st.error("No model selected!")
                      st.stop()
-                if not os.path.exists(SIM_DATA):
-                     st.error(f"Data file not found: {SIM_DATA}")
+                if not os.path.exists(sim_data_path):
+                     st.error(f"Data file not found: {sim_data_path}")
                      st.stop()
                 if not os.path.exists(SIM_SCRIPT):
                      st.error(f"Script not found: {SIM_SCRIPT}")
@@ -74,13 +95,16 @@ def render():
                     try: os.remove(SIM_SNAPSHOT_FILE)
                     except: pass
                 
-                model_path = os.path.join(ZOO_DIR, selected_model)
+                model_path = os.path.join(LOG_DIR, selected_model)
                 cmd = [
                     sys.executable, "-u", SIM_SCRIPT,
                     "--model", model_path,
-                    "--data", SIM_DATA,
+                    "--data", sim_data_path,
                     "--start_date", start_date,
-                    "--speed", str(speed)
+                    "--speed", str(speed),
+                    "--worker_hidden", str(w_hidden),
+                    "--coord_hidden", str(c_hidden),
+                    "--seq_len", str(s_len)
                 ]
                 
                 with open("sim_std.log", "w") as log:

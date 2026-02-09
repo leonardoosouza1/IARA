@@ -322,7 +322,8 @@ class Leaderboard:
         loss: float, 
         auc: float, 
         accuracy: float,
-        model_state: dict
+        model_state: dict,
+        symbol: str = "EURUSD"
     ) -> bool:
         """Update leaderboard. Returns True if new best."""
         entry = {
@@ -342,8 +343,8 @@ class Leaderboard:
         is_best = self.history[0]["epoch"] == epoch
         
         if is_best:
-            logger.info(f"🏆 New Best Model! AUC: {auc:.4f} | Acc: {accuracy:.2%}")
-            torch.save(model_state, MODELS_DIR / "best_model_v9.pth")
+            logger.info(f"🏆 New Best Model for {symbol}! AUC: {auc:.4f} | Acc: {accuracy:.2%}")
+            torch.save(model_state, MODELS_DIR / f"best_model_v9_{symbol}.pth")
         
         return is_best
 
@@ -727,19 +728,25 @@ def main():
     parser.add_argument("--no_amp", action="store_true", default=False, help="Disable Mixed Precision")
     parser.add_argument("--debug", action="store_true", default=False, help="Log every step")
     parser.add_argument("--resume", action="store_true", default=False, help="Resume from checkpoint")
+    parser.add_argument("--symbol", type=str, default="EURUSD", help="Currency pair (e.g. EURUSD, GBPUSD)")
     args = parser.parse_args()
     
     # Setup directories
     LOG_DIR.mkdir(exist_ok=True)
     MODELS_DIR.mkdir(exist_ok=True)
     
+    # Symbol-specific paths
+    metrics_file = LOG_DIR / f"metrics_{args.symbol}.csv"
+    metrics_file_v9 = LOG_DIR / f"metrics_v9_{args.symbol}.csv"
+    telemetry_file = LOG_DIR / f"telemetry_{args.symbol}.json"
+    
     # Initialize metrics CSV - Dashboard format: step,epoch,loss,accuracy,auc,lr
-    with open(METRICS_FILE, "w", newline='') as f:
+    with open(metrics_file, "w", newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["step", "epoch", "loss", "accuracy", "auc", "lr"])
         
     # Initialize V9 detailed metrics
-    with open(METRICS_FILE_V9, "w", newline='') as f:
+    with open(metrics_file_v9, "w", newline='') as f:
         writer = csv.writer(f)
         writer.writerow([
             "epoch", "train_loss", "val_loss", 
@@ -761,7 +768,7 @@ def main():
         device = "cpu"
         logger.warning("⚠️ CUDA not available, using CPU")
     
-    logger.info(f"Device: {device.upper()}")
+    logger.info(f"Device: {device.upper()} | Symbol: {args.symbol}")
     
     # Configuration
     config = TrainConfig(
@@ -776,12 +783,13 @@ def main():
         debug=args.debug
     )
     
-    # Load data
-    logger.info("📂 Loading datasets...")
+    # Load data (Isolated by symbol)
+    logger.info(f"📂 Loading datasets for {args.symbol}...")
+    cache_path = f"data/cache/{args.symbol}"
     
     try:
-        train_ds = MultiTimeframeDataset(seq_len=config.seq_len, split="train")
-        val_ds = MultiTimeframeDataset(seq_len=config.seq_len, split="val")
+        train_ds = MultiTimeframeDataset(data_path=cache_path, seq_len=config.seq_len, split="train")
+        val_ds = MultiTimeframeDataset(data_path=cache_path, seq_len=config.seq_len, split="val")
     except FileNotFoundError as e:
         logger.error(f"❌ Data not found: {e}")
         logger.error("Please run feature_factory.py first to generate training data.")
@@ -822,11 +830,11 @@ def main():
         logger.info(f"  Parameter memory: {param_mem / 1e6:.2f} MB")
     
     # Resume from checkpoint if exists
-    checkpoint_path = MODELS_DIR / "best_model_v9.pth"
+    checkpoint_path = MODELS_DIR / f"best_model_v9_{args.symbol}.pth"
     start_epoch = 0
     
     if args.resume and checkpoint_path.exists():
-        logger.info(f"🏆 Found checkpoint, resuming...")
+        logger.info(f"🏆 Found checkpoint for {args.symbol}, resuming...")
         try:
             state_dict = torch.load(checkpoint_path, map_location=device)
             model.load_state_dict(state_dict, strict=False)
@@ -835,7 +843,7 @@ def main():
             logger.warning(f"  ⚠️ Could not load checkpoint: {e}")
     elif checkpoint_path.exists():
         # Backup existing model if starting fresh
-        backup_path = MODELS_DIR / f"best_model_v9_backup_{int(time.time())}.pth"
+        backup_path = MODELS_DIR / f"best_model_v9_{args.symbol}_backup_{int(time.time())}.pth"
         import shutil
         try:
             shutil.copy(checkpoint_path, backup_path)
@@ -987,7 +995,7 @@ def main():
              logger.warning(f"🚨 Performance Degradation Detected! (AUC: {val_metrics['auc']:.4f} < {best_val_auc:.4f} * 0.95)")
              logger.info("🏆 Rollback: Reloading last best weights and reducing Learning Rate...")
              try:
-                 checkpoint_path = MODELS_DIR / "best_model_v9.pth"
+                 # Checkpoint is symbol-specific
                  if checkpoint_path.exists():
                      state_dict = torch.load(checkpoint_path, map_location=device)
                      model.load_state_dict(state_dict)
@@ -997,9 +1005,9 @@ def main():
                          param_group['lr'] *= 0.8
                      
                      rollback_count += 1
-                     # Update telemetry immediately
+                     # Update telemetry immediately (using symbol-specific file)
                      try:
-                         with open(TELEMETRY_FILE, "w") as f:
+                         with open(telemetry_file, "w") as f:
                              json.dump({"status": "ROLLBACK", "current_epoch": epoch+1, "rollback_count": rollback_count, "new_lr": optimizer.param_groups[0]['lr']}, f)
                      except: pass
                      
@@ -1026,7 +1034,7 @@ def main():
         logger.info(f"{'='*60}\n")
         
         # Save epoch metrics to V9 specific file (detailed)
-        with open(METRICS_FILE_V9, "a", newline='') as f:
+        with open(metrics_file_v9, "a", newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
                 epoch + 1,
@@ -1040,34 +1048,20 @@ def main():
                 current_lr
             ])
         
-        # Update telemetry (Atomic)
-        try:
-            temp_path = f"{TELEMETRY_FILE}.tmp"
-            with open(temp_path, "w") as f:
-                json.dump({
-                    "current_epoch": epoch + 1,
-                    "total_epochs": config.epochs,
-                    "status": "TRAINING",
-                    "train_loss": train_metrics['total'],
-                    "val_loss": val_metrics['total'],
-                    "train_auc": train_metrics['auc'],
-                    "val_auc": val_metrics['auc'],
-                    "acc": val_metrics['accuracy'],
-                    "lr": optimizer.param_groups[0]['lr'],
-                    "rollback_count": rollback_count,
-                    "device": device,
-                    "memory_stats": memory.get_summary() if 'memory' in locals() else None
-                }, f, indent=2)
-            os.replace(temp_path, TELEMETRY_FILE)
-        except: pass
-        
-        # Update leaderboard
-        is_best = leaderboard.update(
+        # Also update the Master Metrics for live dashboard view
+        with open(metrics_file, "a", newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([global_step, epoch + 1, train_metrics['total'], train_metrics['accuracy'], train_metrics['auc'], current_lr])
+
+        # Leaderboard (now takes the symbol-specific checkpoint path)
+        lb_leaderboard = Leaderboard(path=LOG_DIR / f"leaderboard_v9_{args.symbol}.json")
+        is_best = lb_leaderboard.update(
             epoch + 1,
             val_metrics['total'],
             val_metrics['auc'],
             val_metrics['accuracy'],
-            model.state_dict()
+            model.state_dict(),
+            args.symbol
         )
         
         # Early stopping
@@ -1082,8 +1076,8 @@ def main():
             break
     
     # Final telemetry
-    with open(TELEMETRY_FILE, "w") as f:
-        json.dump({"status": "COMPLETED", "best_auc": best_val_auc}, f)
+    with open(telemetry_file, "w") as f:
+        json.dump({"status": "COMPLETED", "symbol": args.symbol, "best_auc": best_val_auc}, f)
     
     logger.info(f"\n✅ Training Complete! Best AUC: {best_val_auc:.4f}")
 

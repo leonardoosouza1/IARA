@@ -125,7 +125,7 @@ def main() -> None:
     parser.add_argument(
         "--backtest_data",
         type=str,
-        default="data/processed/EURUSD.parquet",
+        default=None, # Inferred from symbol
         help="Parquet/CSV path used by backtest",
     )
     parser.add_argument("--backtest_start_date", type=str, default="2023-01-01")
@@ -153,8 +153,14 @@ def main() -> None:
     parser.add_argument(
         "--model_path",
         type=str,
-        default="logs/models/best_model_v9.pth",
-        help="Path to the model checkpoint to evaluate/train (train_v9 writes to this path)",
+        default=None, # Inferred from symbol if None
+        help="Path to the model checkpoint to evaluate/train",
+    )
+    parser.add_argument(
+        "--symbol",
+        type=str,
+        default="EURUSD",
+        help="Currency pair (e.g. EURUSD, GBPUSD)"
     )
 
     args = parser.parse_args()
@@ -165,13 +171,24 @@ def main() -> None:
         )
 
     project_root = str(Path(__file__).resolve().parents[2])
-    work_dir = Path(args.work_dir)
+    
+    # Isolate work_dir by symbol
+    work_dir = Path(args.work_dir) / args.symbol
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    model_path = Path(args.model_path)
+    # Inferred model path
+    if args.model_path is None:
+        model_path = Path("logs/models") / f"best_model_v9_{args.symbol}.pth"
+    else:
+        model_path = Path(args.model_path)
 
     summary: list[dict] = []
 
+    # Inferred backtest data
+    backtest_data = args.backtest_data
+    if backtest_data is None:
+        backtest_data = f"data/processed/{args.symbol}.parquet"
+    
     for cycle in range(1, args.cycles + 1):
         cycle_dir = work_dir / f"cycle_{cycle:02d}"
         cycle_dir.mkdir(parents=True, exist_ok=True)
@@ -193,6 +210,8 @@ def main() -> None:
             str(args.train_worker_hidden),
             "--coord_hidden",
             str(args.train_coord_hidden),
+            "--symbol",
+            args.symbol, # Pass symbol to train_v9
         ]
         patience = args.train_patience
         if patience is None:
@@ -222,7 +241,7 @@ def main() -> None:
             "--model",
             str(model_path),
             "--data",
-            args.backtest_data,
+            str(backtest_data),
             "--start_date",
             args.backtest_start_date,
             "--speed",
