@@ -13,12 +13,59 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ── Professional Dark Theme CSS ──────────────────────────────
+st.markdown("""
+<style>
+    /* Dark pro background */
+    .stApp {
+        background-color: #0e1117;
+    }
+    /* Metric cards */
+    [data-testid="stMetric"] {
+        background: linear-gradient(135deg, #1a1f2e 0%, #141824 100%);
+        border: 1px solid rgba(128, 128, 128, 0.15);
+        border-radius: 12px;
+        padding: 12px 16px;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 1.1rem;
+        font-weight: 700;
+    }
+    [data-testid="stMetricDelta"] > div {
+        font-size: 0.85rem;
+    }
+    /* Dataframe styling */
+    .stDataFrame {
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0e1117 0%, #161b22 100%);
+        border-right: 1px solid rgba(128, 128, 128, 0.1);
+    }
+    /* Plotly chart containers */
+    .stPlotlyChart {
+        border-radius: 8px;
+        border: 1px solid rgba(128, 128, 128, 0.1);
+    }
+    /* Tabs */
+    .stTabs [data-baseweb="tab"] {
+        font-weight: 600;
+    }
+    /* Dividers */
+    hr {
+        border-color: rgba(128, 128, 128, 0.1) !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # Sidebar Navigation
 st.sidebar.title("🧬 I.A.R.A. v8.5")
 st.sidebar.markdown("---")
 
 # Navigation
-page = st.sidebar.radio("Navigation", ["Mission Control", "Training Lab", "Model Manager", "Simulation Lab"])
+page = st.sidebar.radio("Navigation", ["🏢 Trading Desk", "Mission Control", "Training Lab", "Model Manager", "Simulation Lab"])
 
 st.sidebar.markdown("---")
 st.sidebar.info(
@@ -31,7 +78,11 @@ st.sidebar.info(
 )
 
 # Router
-if page == "Mission Control":
+if page == "🏢 Trading Desk":
+    from src.dashboard.pages import live_trading
+    importlib.reload(live_trading)
+    live_trading.render()
+elif page == "Mission Control":
     from src.dashboard.pages import mission_control
     importlib.reload(mission_control)
     mission_control.render()
@@ -45,8 +96,6 @@ elif page == "Model Manager":
     models.render()
 elif page == "Simulation Lab":
     from src.dashboard.pages import simulation
-    # Mock for now if file doesn't exist yet, but we will create it next.
-    # To avoid crashing before creation:
     try:
         importlib.reload(simulation)
         simulation.render()

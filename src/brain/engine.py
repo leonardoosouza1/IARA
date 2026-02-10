@@ -18,6 +18,7 @@ from src.brain.models.trinity_liquid import TrinityLiquidBrain
 
 # Tools
 from src.brain.tools.market_scanner import MarketScanner
+from src.brain.tools.alpaca_executor import AlpacaExecutor
 from src.brain.agents.sentinel_stub import SentinelStub
 
 # Utils
@@ -29,7 +30,10 @@ class EngineConfig:
     lfm_model_name: str = "lfm2.5-thinking:1.2b"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     lfm_refresh_rate: float = 60.0 # Strategic thinking every 60s
-    symbol: str = "EURUSD"
+    symbol: str = "BTC/USD" # Alpaca crypto format
+    alpaca_symbol: str = "BTC/USD"
+    trade_qty: float = 0.01 # Units for crypto or shares for stocks
+    signal_threshold: float = 0.7 
 
 class SharedState:
     """
@@ -77,6 +81,7 @@ class TrinityEngine:
         # Agents
         self.sentinel = SentinelStub()
         self.scanner = MarketScanner()
+        self.executor = AlpacaExecutor()
         
         self.lfm_thread = None
         self.active = False
@@ -189,6 +194,21 @@ class TrinityEngine:
         
         with torch.no_grad():
             decision = self.model(market_data, lfm_ctx, news_vec)
+            
+        # 4. Execution Logic (Live Signal Dispatch)
+        p_buy, p_sell, p_hold = decision[0].tolist()
+        
+        # Check Sentinel (Watchdog)
+        if not self.sentinel.is_safe():
+            self.logger.warning("⚠️ Sentinel blocked execution: DEFCON 1")
+            return decision
+
+        if p_buy > self.config.signal_threshold:
+            self.logger.info(f"🚀 BUY Signal (Conf: {p_buy:.2f}) -> Dispatching to Alpaca")
+            self.executor.place_market_order(self.config.alpaca_symbol, self.config.trade_qty, "BUY")
+        elif p_sell > self.config.signal_threshold:
+            self.logger.info(f"🚀 SELL Signal (Conf: {p_sell:.2f}) -> Dispatching to Alpaca")
+            self.executor.place_market_order(self.config.alpaca_symbol, self.config.trade_qty, "SELL")
             
         return decision
 

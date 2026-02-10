@@ -3,6 +3,7 @@ import time
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
+from src.brain.tools.alpaca_executor import AlpacaExecutor
 
 # Import Engine Components (Mock/Stub for UI if Engine not running in same process)
 # In a real deployment, the Dashboard might communicate via DB or API.
@@ -100,3 +101,35 @@ def render():
         if st.button("🔴 EMERGENCY FREEZE (HARD STOP)", type="primary"):
             st.error("DANGER: SYSTEM HALTED MANUALLY")
             # Logic to write to DB/File to stop engine would go here
+            executor = AlpacaExecutor()
+            executor.close_all_positions()
+
+    # --- ALPACA LIVE MONITOR ---
+    st.markdown("---")
+    st.subheader("🦙 Alpaca Paper Trading Monitor")
+    
+    executor = AlpacaExecutor()
+    if not executor.api_key or not executor.secret_key:
+        st.warning("⚠️ Alpaca Credentials missing in .env. Integration disabled.")
+    else:
+        acc_col, trade_col = st.columns([1, 2])
+        
+        with acc_col:
+            st.markdown("#### Account Summary")
+            summary = executor.get_account_summary()
+            if summary:
+                st.metric("Total Equity", f"${float(summary.get('equity', 0)):,.2f}")
+                st.metric("Buying Power", f"${float(summary.get('buying_power', 0)):,.2f}")
+                st.metric("Unrealized P/L", f"${float(summary.get('unrealized_pl', 0)):,.2f}")
+                st.write(f"**Currency:** {summary.get('currency')}")
+                st.write(f"**Environment:** {'Paper' if executor.paper else 'Live'}")
+            else:
+                st.error("Failed to fetch Alpaca summary.")
+
+        with trade_col:
+            st.markdown("#### Open Positions")
+            positions = executor.get_open_positions()
+            if positions:
+                st.dataframe(pd.DataFrame(positions), use_container_width=True, hide_index=True)
+            else:
+                st.info("No active positions on Alpaca.")

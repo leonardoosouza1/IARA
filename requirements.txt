@@ -21,3 +21,5 @@ python-dotenv
 einops
 scikit-learn
 TA-Lib
+alpaca-py
+pytz
