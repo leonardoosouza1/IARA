@@ -16,7 +16,7 @@ from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDa
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.common.exceptions import APIError
-from alpaca.common.enums import Sort
+
 
 load_dotenv()
 logger = logging.getLogger("AlpacaDataService")
@@ -160,7 +160,6 @@ class AlpacaDataService:
             return pd.DataFrame()
 
     # ─── Bars (Candlestick Data) ───────────────────────────────
-    # ─── Bars (Candlestick Data) ───────────────────────────────
     def get_bars(self, symbol: str = None, timeframe: str = "1Min",
                  limit: int = 200, days_back: int = 1) -> pd.DataFrame:
         symbol = symbol or self.symbol
@@ -180,36 +179,29 @@ class AlpacaDataService:
         lookback_days = max(days_back, 7) 
         start = datetime.now() - timedelta(days=lookback_days)
         
-        # Strategy: Fetch significantly more data (up to 10,000 bars) from start date
-        # to ensure we capture the most recent data even with Default Sort (ASC).
-        # We then return the tail(limit).
-        fetch_limit = 10000
+        # Fetch a reasonable multiple of requested bars to ensure coverage
+        fetch_limit = min(limit * 3, 2000)
 
         try:
             if self.is_crypto(symbol):
-                # print(f"DEBUG: Fetching Crypto for {symbol} (Large Limit) since {start}")
                 request = CryptoBarsRequest(
                     symbol_or_symbols=[symbol],
                     timeframe=tf,
                     start=start,
-                    limit=fetch_limit, # Fetch huge chunk to reach "now"
-                    # sort=Sort.DESC # REMOVED due to SDK bug
+                    limit=fetch_limit,
                 )
                 bars = self._crypto_data_client.get_crypto_bars(request)
             else:
-                # print(f"DEBUG: Fetching Stock for {symbol} (Large Limit) since {start}")
                 request = StockBarsRequest(
                     symbol_or_symbols=[symbol],
                     timeframe=tf,
                     start=start,
-                    limit=fetch_limit, # Fetch huge chunk to reach "now"
-                    # sort=Sort.DESC # REMOVED due to SDK bug
+                    limit=fetch_limit,
                 )
                 bars = self._stock_data_client.get_stock_bars(request)
 
             df = bars.df
             if df.empty:
-                print(f"WARN: Empty DataFrame for {symbol}")
                 return pd.DataFrame()
 
             # Flatten multi-index if present
@@ -234,7 +226,6 @@ class AlpacaDataService:
 
         except Exception as e:
             logger.error(f"Bars fetch error: {e}")
-            print(f"CRITICAL: Bars fetch exception: {e}")
             return pd.DataFrame()
 
     # ─── Portfolio History (Equity Curve) ──────────────────────

@@ -1,5 +1,6 @@
 import streamlit as st
 import subprocess
+from pathlib import Path
 import os
 import signal  # For killing the process
 import time
@@ -201,7 +202,76 @@ def render():
             else:
                 batch_size = batch_preset
 
-            st.caption("Compute Unit: GPU (ROCm)")
+            # Market Configuration
+            st.divider()
+            st.subheader("📊 Market Configuration")
+            market_type = st.radio("Market Type", ["Forex", "Crypto"], horizontal=True)
+            
+            if market_type == "Crypto":
+                crypto_symbols = ["BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD", "LTCUSD"]
+                symbol = st.selectbox("Symbol", crypto_symbols, index=0)
+                
+                # Check if data exists
+                data_path = Path(f"data/processed/{symbol}.parquet")
+                cache_path = Path(f"data/cache/{symbol}")
+                
+                if data_path.exists():
+                    st.success(f"✅ Historical data found: {data_path.name}")
+                else:
+                    st.warning(f"⚠️ No data for {symbol}. Fetch it below.")
+                
+                if not cache_path.exists() or not list(cache_path.glob("train_shards/*.pt")):
+                    st.warning(f"⚠️ No training cache for {symbol}. Run Feature Factory after fetching data.")
+                
+                # Data fetch controls
+                with st.expander("📥 Fetch Crypto Data"):
+                    fetch_days = st.slider("Days of History", 7, 365, 90, key="fetch_days")
+                    fetch_tf = st.selectbox("Timeframe", ["1Min", "5Min", "15Min"], index=0, key="fetch_tf")
+                    alpaca_symbol = symbol[:3] + "/" + symbol[3:]  # BTCUSD -> BTC/USD
+                    
+                    if st.button("📥 Fetch Data from Alpaca", type="secondary"):
+                        fetch_cmd = [
+                            "python3", "src/data/crypto_data_fetcher.py",
+                            "--symbol", alpaca_symbol,
+                            "--days", str(fetch_days),
+                            "--timeframe", fetch_tf,
+                        ]
+                        st.info(f"Running: {' '.join(fetch_cmd)}")
+                        log_file = open("crypto_fetch.log", "w")
+                        proc = subprocess.Popen(fetch_cmd, stdout=log_file, stderr=log_file)
+                        proc.wait()
+                        log_file.close()
+                        if proc.returncode == 0:
+                            st.success("✅ Data fetched!")
+                        else:
+                            with open("crypto_fetch.log", "r") as f:
+                                st.error(f"❌ Fetch failed:\n{f.read()[-500:]}")
+                        time.sleep(1)
+                        st.rerun()
+                    
+                    if st.button("⚙️ Run Feature Factory", type="secondary"):
+                        ff_cmd = [
+                            "python3", "src/data/feature_factory.py",
+                            "--symbol", symbol,
+                            "--market-type", "crypto",
+                        ]
+                        st.info(f"Running: {' '.join(ff_cmd)}")
+                        log_file = open("feature_factory.log", "w")
+                        proc = subprocess.Popen(ff_cmd, stdout=log_file, stderr=log_file)
+                        proc.wait()
+                        log_file.close()
+                        if proc.returncode == 0:
+                            st.success("✅ Features generated!")
+                        else:
+                            with open("feature_factory.log", "r") as f:
+                                st.error(f"❌ Feature Factory failed:\n{f.read()[-500:]}")
+                        time.sleep(1)
+                        st.rerun()
+            else:
+                forex_symbols = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]
+                symbol = st.selectbox("Symbol", forex_symbols, index=0)
+
+            st.caption(f"Compute Unit: GPU (ROCm) | Symbol: {symbol}")
 
             # Resume/Reset Logic
             start_mode = st.radio(
@@ -424,6 +494,8 @@ def render():
                 str(lr),
                 "--batch_size",
                 str(batch_size),
+                "--symbol",
+                symbol,
             ]
 
             if "Resume" in start_mode:

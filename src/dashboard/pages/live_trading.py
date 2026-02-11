@@ -28,6 +28,25 @@ def render():
     with st.sidebar:
         st.header("⚙️ Trading Desk Config")
         
+        # Active Brain Indicator
+        import json
+        active_meta_path = "logs/models/active_model.json"
+        if os.path.exists(active_meta_path):
+            try:
+                with open(active_meta_path, "r") as f:
+                    active_brain = json.load(f)
+                st.success(f"🧠 **Active Brain**: {active_brain.get('symbol', 'N/A')}")
+                col1, col2 = st.columns(2)
+                col1.caption(f"Market: {active_brain.get('market_type', 'N/A').capitalize()}")
+                col2.caption(f"AUC: {active_brain.get('auc', 0):.4f}")
+            except Exception:
+                st.warning("🧠 Brain file corrupted")
+        else:
+            st.warning("🧠 No Brain deployed")
+            st.caption("Go to Models → Deploy")
+        
+        st.divider()
+        
         # Asset Selection
         asset_type = st.radio("Asset Class", ["Crypto", "Stocks"], horizontal=True)
         available_assets = service.get_available_assets("crypto" if asset_type == "Crypto" else "us_equity")
@@ -41,30 +60,14 @@ def render():
         symbol = st.selectbox("Symbol", available_assets, index=default_idx)
         timeframe = st.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour", "1Day"], index=1)
         chart_limit = st.slider("Candles", 50, 500, 200)
-        days_back = st.slider("Days Back", 1, 30, 3) # Default increased to 3
+        days_back = st.slider("Days Back", 1, 30, 3)
         auto_refresh = st.toggle("Auto-Refresh (3s)", value=True)
         order_filter = st.selectbox("Orders Filter", ["all", "closed", "open"])
 
     # ── Fetch All Data ────────────────────────────────────────
-    # FORCE PRINT DEBUGGING TO DOCKER LOGS
-    print(f"\n--- [LIVE TRADING REFRESH] {datetime.now()} ---")
-    print(f"Requesting: {symbol} {timeframe} Limit={chart_limit}")
-
     account = service.get_account()
     positions = service.get_positions()
-    
-    try:
-        df_bars = service.get_bars(symbol=symbol, timeframe=timeframe, limit=chart_limit, days_back=days_back)
-        print(f"Received DF Shape: {df_bars.shape}")
-        if not df_bars.empty:
-            print("Head:\n", df_bars.head(2))
-            print("Tail:\n", df_bars.tail(2))
-        else:
-            print("!!! DF IS EMPTY !!!")
-            
-    except Exception as e:
-        print(f"!!! EXCEPTION in live_trading.get_bars: {e}")
-        df_bars = pd.DataFrame()
+    df_bars = service.get_bars(symbol=symbol, timeframe=timeframe, limit=chart_limit, days_back=days_back)
 
     df_orders = service.get_orders(status=order_filter, limit=100)
     df_equity = service.get_portfolio_history(period="1D", timeframe="5Min")
