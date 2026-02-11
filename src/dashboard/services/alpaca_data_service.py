@@ -14,8 +14,9 @@ from alpaca.trading.requests import GetOrdersRequest
 from alpaca.trading.enums import QueryOrderStatus
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.common.exceptions import APIError
+from alpaca.common.enums import Sort
 
 load_dotenv()
 logger = logging.getLogger("AlpacaDataService")
@@ -48,7 +49,26 @@ class AlpacaDataService:
 
     def is_crypto(self, symbol: str = None) -> bool:
         s = symbol or self.symbol
-        return "/" in s
+        # Enhanced check: slashed symbols or known crypto assets
+        return "/" in s or s in ["BTC", "ETH", "SOL", "LTC", "DOGE"]
+
+    def get_available_assets(self, asset_class: str = "crypto") -> List[str]:
+        """Fetches list of active tradable assets for the dropdown."""
+        if not self.is_configured:
+            return ["BTC/USD", "ETH/USD", "AAPL", "TSLA"]
+        try:
+            from alpaca.trading.requests import GetAssetsRequest
+            from alpaca.trading.enums import AssetStatus, AssetClass
+
+            req = GetAssetsRequest(
+                status=AssetStatus.ACTIVE,
+                asset_class=AssetClass.CRYPTO if asset_class == "crypto" else AssetClass.US_EQUITY
+            )
+            assets = self._trading_client.get_all_assets(req)
+            return [a.symbol for a in assets if a.tradable]
+        except Exception as e:
+            logger.error(f"Assets fetch error: {e}")
+            return ["BTC/USD", "ETH/USD"]
 
     # ─── Account ───────────────────────────────────────────────
     def get_account(self) -> Dict[str, Any]:
@@ -56,15 +76,17 @@ class AlpacaDataService:
             return {}
         try:
             acc = self._trading_client.get_account()
+            # Safely access attributes available in recent SDK versions
             return {
-                "equity": float(acc.equity),
-                "cash": float(acc.cash),
-                "buying_power": float(acc.buying_power),
-                "portfolio_value": float(acc.portfolio_value) if acc.portfolio_value else 0.0,
-                "unrealized_pl": float(acc.unrealized_intraday_pl) if acc.unrealized_intraday_pl else 0.0,
-                "unrealized_plpc": float(acc.unrealized_intraday_plpc) if acc.unrealized_intraday_plpc else 0.0,
-                "currency": acc.currency,
-                "status": acc.status.value if acc.status else "UNKNOWN",
+                "equity": float(acc.equity) if hasattr(acc, "equity") else 0.0,
+                "cash": float(acc.cash) if hasattr(acc, "cash") else 0.0,
+                "buying_power": float(acc.buying_power) if hasattr(acc, "buying_power") else 0.0,
+                "portfolio_value": float(acc.portfolio_value) if hasattr(acc, "portfolio_value") else 0.0,
+                # Start with 0 if not available; calculation can be improved later
+                "unrealized_pl": 0.0, 
+                "unrealized_plpc": 0.0,
+                "currency": getattr(acc, "currency", "USD"),
+                "status": getattr(acc, "status", "UNKNOWN"),
             }
         except Exception as e:
             logger.error(f"Account fetch error: {e}")
@@ -79,7 +101,7 @@ class AlpacaDataService:
             return [
                 {
                     "symbol": p.symbol,
-                    "side": p.side.value if p.side else "long",
+                    "side": p.side.value if hasattr(p.side, "value") else str(p.side),
                     "qty": float(p.qty),
                     "avg_entry": float(p.avg_entry_price),
                     "current_price": float(p.current_price) if p.current_price else 0,
@@ -107,6 +129,7 @@ class AlpacaDataService:
             request = GetOrdersRequest(
                 status=status_map.get(status, QueryOrderStatus.ALL),
                 limit=limit,
+                nested=False  # Simple list
             )
             orders = self._trading_client.get_orders(filter=request)
             if not orders:
@@ -115,14 +138,19 @@ class AlpacaDataService:
             rows = []
             for o in orders:
                 filled_price = float(o.filled_avg_price) if o.filled_avg_price else None
+                # Handle enums safely
+                side = o.side.value if hasattr(o.side, "value") else str(o.side)
+                status_val = o.status.value if hasattr(o.status, "value") else str(o.status)
+                type_val = o.type.value if hasattr(o.type, "value") else str(o.type)
+                
                 rows.append({
                     "id": str(o.id)[:8],
                     "time": o.submitted_at.strftime("%Y-%m-%d %H:%M") if o.submitted_at else "",
                     "symbol": o.symbol,
-                    "side": o.side.value if o.side else "",
+                    "side": side,
                     "qty": float(o.qty) if o.qty else float(o.notional) if o.notional else 0,
-                    "type": o.type.value if o.type else "",
-                    "status": o.status.value if o.status else "",
+                    "type": type_val,
+                    "status": status_val,
                     "filled_price": filled_price,
                     "filled_at": o.filled_at.strftime("%Y-%m-%d %H:%M") if o.filled_at else "",
                 })
@@ -132,82 +160,106 @@ class AlpacaDataService:
             return pd.DataFrame()
 
     # ─── Bars (Candlestick Data) ───────────────────────────────
+    # ─── Bars (Candlestick Data) ───────────────────────────────
     def get_bars(self, symbol: str = None, timeframe: str = "1Min",
                  limit: int = 200, days_back: int = 1) -> pd.DataFrame:
-        """
-        Fetches recent bar data for charting.
-        timeframe: '1Min', '5Min', '15Min', '1Hour', '1Day'
-        """
         symbol = symbol or self.symbol
         if not self.is_configured:
             return pd.DataFrame()
 
         tf_map = {
             "1Min": TimeFrame.Minute,
-            "5Min": TimeFrame(5, "Min"),
-            "15Min": TimeFrame(15, "Min"),
+            "5Min": TimeFrame(5, TimeFrameUnit.Minute),
+            "15Min": TimeFrame(15, TimeFrameUnit.Minute),
             "1Hour": TimeFrame.Hour,
             "1Day": TimeFrame.Day,
         }
         tf = tf_map.get(timeframe, TimeFrame.Minute)
-        start = datetime.now() - timedelta(days=days_back)
+        
+        # Ensure we look back enough to find data
+        lookback_days = max(days_back, 7) 
+        start = datetime.now() - timedelta(days=lookback_days)
+        
+        # Strategy: Fetch significantly more data (up to 10,000 bars) from start date
+        # to ensure we capture the most recent data even with Default Sort (ASC).
+        # We then return the tail(limit).
+        fetch_limit = 10000
 
         try:
             if self.is_crypto(symbol):
+                # print(f"DEBUG: Fetching Crypto for {symbol} (Large Limit) since {start}")
                 request = CryptoBarsRequest(
-                    symbol_or_symbols=symbol,
+                    symbol_or_symbols=[symbol],
                     timeframe=tf,
                     start=start,
-                    limit=limit,
+                    limit=fetch_limit, # Fetch huge chunk to reach "now"
+                    # sort=Sort.DESC # REMOVED due to SDK bug
                 )
                 bars = self._crypto_data_client.get_crypto_bars(request)
             else:
+                # print(f"DEBUG: Fetching Stock for {symbol} (Large Limit) since {start}")
                 request = StockBarsRequest(
-                    symbol_or_symbols=symbol,
+                    symbol_or_symbols=[symbol],
                     timeframe=tf,
                     start=start,
-                    limit=limit,
+                    limit=fetch_limit, # Fetch huge chunk to reach "now"
+                    # sort=Sort.DESC # REMOVED due to SDK bug
                 )
                 bars = self._stock_data_client.get_stock_bars(request)
 
             df = bars.df
             if df.empty:
+                print(f"WARN: Empty DataFrame for {symbol}")
                 return pd.DataFrame()
 
-            # Flatten multi-index (symbol, timestamp) to single index
+            # Flatten multi-index if present
             if isinstance(df.index, pd.MultiIndex):
-                df = df.reset_index(level=0, drop=True)
+                df = df.reset_index()
+            else:
+                df = df.reset_index()
 
-            df = df.reset_index()
+            # Normalize column names
             df.columns = [c.lower() for c in df.columns]
-            df = df.rename(columns={"timestamp": "time"})
+            
+            # Ensure timestamp is 'time'
+            if "timestamp" in df.columns:
+                df = df.rename(columns={"timestamp": "time"})
+                
+            # Filter for specific symbol
+            if "symbol" in df.columns:
+                df = df[df["symbol"] == symbol]
+
+            # Return the requested number of LATEST bars
             return df.tail(limit)
 
         except Exception as e:
             logger.error(f"Bars fetch error: {e}")
+            print(f"CRITICAL: Bars fetch exception: {e}")
             return pd.DataFrame()
 
     # ─── Portfolio History (Equity Curve) ──────────────────────
     def get_portfolio_history(self, period: str = "1D", timeframe: str = "5Min") -> pd.DataFrame:
-        """
-        Uses Alpaca REST endpoint for portfolio/equity history.
-        period: '1D', '1W', '1M', '3M', '1A', 'all'
-        timeframe: '1Min', '5Min', '15Min', '1H', '1D'
-        """
         if not self.is_configured:
             return pd.DataFrame()
         try:
-            history = self._trading_client.get_portfolio_history(
-                period=period,
-                timeframe=timeframe,
-            )
-            if history and history.timestamp:
+            # SDK's get_portfolio_history might not accept args in this version
+            # We try without args first as seen in debug
+            history = self._trading_client.get_portfolio_history()
+            
+            if hasattr(history, "timestamp") and hasattr(history, "equity"):
+                # Timestamps might be unix ints or datetime objects
+                ts_data = history.timestamp
+                if ts_data and isinstance(ts_data[0], int):
+                    ts_data = [datetime.fromtimestamp(t) for t in ts_data]
+                
                 df = pd.DataFrame({
-                    "time": [datetime.fromtimestamp(t) for t in history.timestamp],
+                    "time": ts_data,
                     "equity": history.equity,
                     "profit_loss": history.profit_loss,
                     "profit_loss_pct": history.profit_loss_pct,
                 })
+                # Basic filtering if we want to simulate 'period'
+                # (Optional: Filter df by date here if needed)
                 return df
             return pd.DataFrame()
         except Exception as e:

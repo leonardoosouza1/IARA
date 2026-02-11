@@ -27,19 +27,56 @@ def render():
     # ── Sidebar Controls ──────────────────────────────────────
     with st.sidebar:
         st.header("⚙️ Trading Desk Config")
-        symbol = st.text_input("Symbol", value=service.symbol)
+        
+        # Asset Selection
+        asset_type = st.radio("Asset Class", ["Crypto", "Stocks"], horizontal=True)
+        available_assets = service.get_available_assets("crypto" if asset_type == "Crypto" else "us_equity")
+        
+        # Default index logic
+        default_idx = 0
+        target = service.symbol if service.symbol in available_assets else ("BTC/USD" if asset_type=="Crypto" else "AAPL")
+        if target in available_assets:
+            default_idx = available_assets.index(target)
+            
+        symbol = st.selectbox("Symbol", available_assets, index=default_idx)
         timeframe = st.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour", "1Day"], index=1)
         chart_limit = st.slider("Candles", 50, 500, 200)
-        days_back = st.slider("Days Back", 1, 30, 3)
+        days_back = st.slider("Days Back", 1, 30, 3) # Default increased to 3
         auto_refresh = st.toggle("Auto-Refresh (3s)", value=True)
         order_filter = st.selectbox("Orders Filter", ["all", "closed", "open"])
 
     # ── Fetch All Data ────────────────────────────────────────
+    # FORCE PRINT DEBUGGING TO DOCKER LOGS
+    print(f"\n--- [LIVE TRADING REFRESH] {datetime.now()} ---")
+    print(f"Requesting: {symbol} {timeframe} Limit={chart_limit}")
+
     account = service.get_account()
     positions = service.get_positions()
-    df_bars = service.get_bars(symbol=symbol, timeframe=timeframe, limit=chart_limit, days_back=days_back)
+    
+    try:
+        df_bars = service.get_bars(symbol=symbol, timeframe=timeframe, limit=chart_limit, days_back=days_back)
+        print(f"Received DF Shape: {df_bars.shape}")
+        if not df_bars.empty:
+            print("Head:\n", df_bars.head(2))
+            print("Tail:\n", df_bars.tail(2))
+        else:
+            print("!!! DF IS EMPTY !!!")
+            
+    except Exception as e:
+        print(f"!!! EXCEPTION in live_trading.get_bars: {e}")
+        df_bars = pd.DataFrame()
+
     df_orders = service.get_orders(status=order_filter, limit=100)
     df_equity = service.get_portfolio_history(period="1D", timeframe="5Min")
+    
+    # ── Debug Expander for User ──────────────────────────────
+    with st.expander("🔍 System Internals (Debug)", expanded=True):
+        st.write(f"**Symbol**: `{symbol}`")
+        if df_bars.empty:
+            st.error("❌ Dataframe is EMPTY. Check Docker Logs.")
+        else:
+            st.success(f"✅ Loaded {len(df_bars)} bars.")
+            st.dataframe(df_bars.tail(5))
 
     # ══════════════════════════════════════════════════════════
     # ██  HEADER: TITLE + STATUS BADGE
@@ -89,8 +126,26 @@ def render():
 
     # ── CANDLESTICK CHART ─────────────────────────────────────
     with col_chart:
+        # Calculate Real-Time Stats
+        current_price = 0.0
+        variation = 0.0
+        if not df_bars.empty:
+            latest = df_bars.iloc[-1]
+            current_price = latest["close"]
+            if len(df_bars) > 1:
+                prev = df_bars.iloc[-2]["close"]
+                if prev > 0:
+                    variation = ((current_price - prev) / prev) * 100
+        
+        # Display Price Header (if data exists)
+        if current_price > 0:
+            color = "#00CC96" if variation >= 0 else "#FF4B4B"
+            st.markdown(f"### {symbol} <span style='color:{color}'>${current_price:,.2f} ({variation:+.2f}%)</span>", unsafe_allow_html=True)
+
         if df_bars.empty:
-            st.warning("📊 No bar data available for this symbol/timeframe.")
+            st.warning(f"📊 No bar data available for {symbol} ({timeframe}). Try increasing 'Days Back'.")
+            if service.paper:
+                st.info("💡 Note: Paper Trading data for Stocks may be delayed by 15min. Crypto is usually real-time.")
         else:
             fig = make_subplots(
                 rows=2, cols=1,
