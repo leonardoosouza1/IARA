@@ -23,3 +23,11 @@ scikit-learn
 TA-Lib
 alpaca-py
 pytz
+
+# API Server
+fastapi
+uvicorn[standard]
+python-socketio
+python-jose[cryptography]
+passlib[bcrypt]
+slowapi

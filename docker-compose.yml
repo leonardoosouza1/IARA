@@ -6,6 +6,10 @@ services:
     container_name: saci_trader_bot
     restart: unless-stopped
     
+    # Port mapping (FastAPI API Server)
+    ports:
+      - "8000:8000"
+    
     # Mapeamento de Volumes
     volumes:
       - ./src:/app/src
@@ -31,10 +35,17 @@ services:
     cap_add:
       - SYS_PTRACE
       
-    # Variável Mágica para RDNA2 (Sua GPU)
+    # Environment
     environment:
       - HSA_OVERRIDE_GFX_VERSION=10.3.0
       - PYTHONPATH=/app
+      - FRONTEND_URL=http://localhost:3000
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - API_DEBUG=true
+    
+    # Command: Launch IARA API Server
+    command: ["python", "-m", "src.api.main"]
     
     stdin_open: true
     tty: true

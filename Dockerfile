@@ -34,8 +34,8 @@ COPY . .
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Expose port
-EXPOSE 8501
+# Expose port (FastAPI API Server)
+EXPOSE 8000
 
-# Default command
-CMD ["streamlit", "run", "src/dashboard/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+# Default command: Launch IARA API Server
+CMD ["python", "-m", "src.api.main"]
