@@ -9,40 +9,18 @@ interface RealTimeChartProps {
   height?: number;
 }
 
-// Demo candle data for development
-function generateDemoCandles(count: number): CandlestickData<Time>[] {
-  const candles: CandlestickData<Time>[] = [];
-  let price = 97000;
-  const now = Math.floor(Date.now() / 1000);
-
-  for (let i = count; i > 0; i--) {
-    const open = price + (Math.random() - 0.5) * 200;
-    const close = open + (Math.random() - 0.5) * 300;
-    const high = Math.max(open, close) + Math.random() * 100;
-    const low = Math.min(open, close) - Math.random() * 100;
-    price = close;
-
-    candles.push({
-      time: (now - i * 300) as Time,
-      open: parseFloat(open.toFixed(2)),
-      high: parseFloat(high.toFixed(2)),
-      low: parseFloat(low.toFixed(2)),
-      close: parseFloat(close.toFixed(2)),
-    });
-  }
-  return candles;
-}
-
 export function RealTimeChart({ symbol, height = 400 }: RealTimeChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const candles = useFleetStore((s) => s.candles[symbol]);
+  const ticks = useFleetStore((s) => s.ticks[symbol]);
+
+  // Keep track of the current forming candle
+  const currentBar = useRef<CandlestickData<Time> | null>(null);
 
   const initChart = useCallback(() => {
     if (!chartContainerRef.current) return;
-
-
 
     const chart = createChart(chartContainerRef.current, {
       width: chartContainerRef.current.clientWidth,
@@ -58,8 +36,14 @@ export function RealTimeChart({ symbol, height = 400 }: RealTimeChartProps) {
         horzLines: { color: "rgba(255, 255, 255, 0.03)" },
       },
       crosshair: {
-        vertLine: { color: "rgba(99, 102, 241, 0.3)", labelBackgroundColor: "#6366f1" },
-        horzLine: { color: "rgba(99, 102, 241, 0.3)", labelBackgroundColor: "#6366f1" },
+        vertLine: {
+          color: "rgba(99, 102, 241, 0.3)",
+          labelBackgroundColor: "#6366f1",
+        },
+        horzLine: {
+          color: "rgba(99, 102, 241, 0.3)",
+          labelBackgroundColor: "#6366f1",
+        },
       },
       rightPriceScale: {
         borderColor: "rgba(255, 255, 255, 0.05)",
@@ -80,16 +64,18 @@ export function RealTimeChart({ symbol, height = 400 }: RealTimeChartProps) {
       wickDownColor: "#f43f5e",
     });
 
-    // Load initial data (demo or from store)
-    const initialData = candles?.map((c) => ({
-      time: c.time as Time,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    })) || generateDemoCandles(100);
+    // Load initial data (from store only)
+    const initialData =
+      candles?.map((c) => ({
+        time: c.time as Time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      })) || [];
 
     series.setData(initialData);
+
     chart.timeScale().fitContent();
 
     chartRef.current = chart;
@@ -109,20 +95,20 @@ export function RealTimeChart({ symbol, height = 400 }: RealTimeChartProps) {
       chartRef.current = null;
       seriesRef.current = null;
     };
-  }, [height, candles, symbol]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [height, symbol]); 
 
   useEffect(() => {
     const cleanup = initChart();
     return cleanup;
-    // Only re-initialize on mount or height change, not candle updates
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [height]);
+  }, [initChart]);
 
-  // Update chart with new candles (without re-initializing)
+  // Handle closed candles updates (Add new bar)
   useEffect(() => {
     if (!seriesRef.current || !candles?.length) return;
 
     const lastCandle = candles[candles.length - 1];
+    // Update the series with the closed candle (this confirms it)
     seriesRef.current.update({
       time: lastCandle.time as Time,
       open: lastCandle.open,
@@ -130,7 +116,42 @@ export function RealTimeChart({ symbol, height = 400 }: RealTimeChartProps) {
       low: lastCandle.low,
       close: lastCandle.close,
     });
+
+    // Reset current bar to allow next tick to start a new one
+    currentBar.current = null;
   }, [candles]);
+
+  // Handle real-time ticks (Update forming bar)
+  useEffect(() => {
+    if (!seriesRef.current || !ticks?.length || !candles?.length) return;
+
+    const lastTick = ticks[ticks.length - 1];
+    const lastClosedCandle = candles[candles.length - 1];
+
+    // Determine time for the forming candle (e.g., last closed + 5s)
+    const nextTime = ((lastClosedCandle.time as number) + 5) as Time;
+
+    let bar = currentBar.current;
+
+    if (!bar) {
+      // Start new bar
+      bar = {
+        time: nextTime,
+        open: lastClosedCandle.close,
+        high: Math.max(lastClosedCandle.close, lastTick.price),
+        low: Math.min(lastClosedCandle.close, lastTick.price),
+        close: lastTick.price,
+      };
+    } else {
+      // Update existing bar
+      bar.high = Math.max(bar.high, lastTick.price);
+      bar.low = Math.min(bar.low, lastTick.price);
+      bar.close = lastTick.price;
+    }
+
+    currentBar.current = bar;
+    seriesRef.current.update(bar);
+  }, [ticks, candles]);
 
   return (
     <div className="w-full rounded-lg overflow-hidden bg-zinc-900/30 border border-zinc-800/40">

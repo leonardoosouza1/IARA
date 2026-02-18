@@ -31,3 +31,4 @@ python-socketio
 python-jose[cryptography]
 passlib[bcrypt]
 slowapi
+ccxt

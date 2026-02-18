@@ -19,6 +19,8 @@ export const metadata: Metadata = {
   description: "Intelligent Autonomous Real-time Agent. Professional multi-market trading platform.",
 };
 
+import { SocketProvider } from "@/components/providers/socket-provider";
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -26,11 +28,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="pt-BR" className="dark">
-      <body className={`${inter.variable} ${jetbrainsMono.variable} font-sans antialiased bg-zinc-950 text-zinc-100`}>
-        <TooltipProvider delayDuration={200}>
-          {children}
-        </TooltipProvider>
-        <Toaster richColors position="top-right" />
+      <body
+        className={`${inter.variable} ${jetbrainsMono.variable} font-sans antialiased bg-zinc-950 text-zinc-100`}
+      >
+        <SocketProvider>
+          <TooltipProvider delayDuration={200}>{children}</TooltipProvider>
+          <Toaster richColors position="top-right" />
+        </SocketProvider>
       </body>
     </html>
   );

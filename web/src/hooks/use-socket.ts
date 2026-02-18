@@ -12,9 +12,12 @@ export function useSocket() {
     setSocketConnected,
     addTick,
     addCandle,
+    setCandles,
     addThought,
     updateAgent,
     setAgents,
+    agents,
+    socketConnected
   } = useFleetStore();
 
   useEffect(() => {
@@ -47,8 +50,14 @@ export function useSocket() {
     });
 
     socket.on("candle_closed", (data: CandleData & { symbol: string }) => {
+      // Backend might send { symbol, ...candle } or just candle if room is specific
+      // Assuming wrapper { symbol, ...candle } based on previous code
       const { symbol, ...candle } = data;
       addCandle(symbol, candle);
+    });
+
+    socket.on("historical_candles", (data: { symbol: string; candles: CandleData[] }) => {
+      setCandles(data.symbol, data.candles);
     });
 
     // Brain Events
@@ -71,6 +80,7 @@ export function useSocket() {
       socket.off("disconnect");
       socket.off("market_tick");
       socket.off("candle_closed");
+      socket.off("historical_candles");
       socket.off("brain_thought");
       socket.off("agent_update");
       socket.off("fleet_sync");
@@ -81,8 +91,25 @@ export function useSocket() {
     setSocketConnected,
     addTick,
     addCandle,
+    setCandles,
     addThought,
     updateAgent,
     setAgents,
   ]);
+
+  // Auto-subscribe to market data channels when agents are loaded
+  useEffect(() => {
+    const socket = getSocket();
+    if (socketConnected && agents.length > 0) {
+      agents.forEach((agent) => {
+        // Emit subscribe to join the room for this symbol
+        // Backend expects { symbol: "BTC/USD" }
+        socket.emit("subscribe", { symbol: agent.symbol });
+
+        // Request history for the chart (Fix for late joiners)
+        socket.emit("request_history", { symbol: agent.symbol });
+
+      });
+    }
+  }, [socketConnected, agents]);
 }

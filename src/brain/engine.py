@@ -80,6 +80,9 @@ class SharedState:
         # LFM strategic context (optional)
         self.lfm_bias: float = 0.0  # -1 (bearish) to +1 (bullish)
         self.lfm_summary: str = ""
+        
+        # Position State
+        self.current_position: Optional[dict] = None
 
     def update_signal(self, signal: TradeSignal, price: float):
         with self.lock:
@@ -92,6 +95,14 @@ class SharedState:
             self.lfm_bias = bias
             self.lfm_summary = summary
 
+    def update_position(self, position: dict):
+        with self.lock:
+            self.current_position = position
+
+    def get_position_summary(self) -> Optional[dict]:
+        with self.lock:
+            return self.current_position
+
     def get_state(self) -> dict:
         with self.lock:
             return {
@@ -100,6 +111,7 @@ class SharedState:
                 "lfm_bias": self.lfm_bias,
                 "lfm_summary": self.lfm_summary,
                 "last_update": self.last_update,
+                "position": self.current_position,
             }
 
 

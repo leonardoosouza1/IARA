@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
+import { getSocket } from "@/lib/socket";
 
 function formatPnl(pnl: number): string {
   const sign = pnl >= 0 ? "+" : "";
@@ -47,10 +48,9 @@ export default function GodModePage({ params }: { params: Promise<{ id: string }
   const handleAction = async (action: "buy" | "sell") => {
     if (!agent) return;
     try {
-      await api.post("/api/v1/fleet/override", { agent_id: agent.id, action });
-      toast.success(
-        `Force ${action.toUpperCase()} signal sent to ${agent.symbol}`,
-      );
+      // Direct WebSocket emit for real-time action
+      getSocket().emit("manual_override", { agent_id: agent.id, action });
+      toast.info(`Sending Force ${action.toUpperCase()} command...`);
     } catch {
       toast.error("Failed to send override command");
     }

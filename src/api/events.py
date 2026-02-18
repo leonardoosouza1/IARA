@@ -144,3 +144,25 @@ class SocketEmitter:
             "agentId": agent_id,
             **votes,
         })
+    @staticmethod
+    async def emit_historical_candles(symbol: str, candles: list):
+        """Emit historical candles to frontend."""
+        await sio.emit(
+            "historical_candles",
+            {
+                "symbol": symbol,
+                "candles": candles,
+            },
+            room=f"market:{symbol}",
+        )
+
+@sio.event
+async def request_history(sid: str, data: dict):
+    """Handle history request from frontend."""
+    from src.api.market_data import market_service
+    symbol = data.get("symbol")
+    if symbol:
+        history = market_service.get_history(symbol)
+        if history:
+            await SocketEmitter.emit_historical_candles(symbol, history)
+

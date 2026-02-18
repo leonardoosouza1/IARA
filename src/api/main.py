@@ -20,7 +20,7 @@ from src.api.config import settings
 from src.api.events import sio
 from src.api.auth.router import router as auth_router
 from src.api.fleet.router import router as fleet_router
-from src.api.market_data import MarketDataService
+from src.api.market_data import market_service
 
 # ── Logging ───────────────────────────────────────────────────
 
@@ -31,8 +31,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("iara.server")
 
-# Service Instance
-market_service = MarketDataService()
 
 
 # ── App Lifecycle ─────────────────────────────────────────────
@@ -52,7 +50,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    market_service.stop()
+    await market_service.stop()
     service_task.cancel()
     logger.info("I.A.R.A. API Server stopped.")
 
