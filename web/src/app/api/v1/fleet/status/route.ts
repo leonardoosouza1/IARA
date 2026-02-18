@@ -1,63 +1,72 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 
-// DEV MOCK: Return demo fleet data
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
+
+/**
+ * Proxy to the Python backend fleet status endpoint.
+ * Forwards the auth cookie for authentication.
+ */
 export async function GET() {
-  const agents = [
-    {
-      id: "agent-btc-1",
-      symbol: "BTC/USD",
-      marketType: "crypto",
-      status: "in_trade",
-      modelName: "SwarmBrain v9",
-      pnl: 324.50,
-      winRate: 0.67,
-      totalTrades: 12,
-      currentPosition: {
-        side: "long",
-        entryPrice: 97500,
-        currentPrice: 98200,
-        size: 0.01,
-        unrealizedPnl: 7.0,
-        entryTime: "2026-02-17T10:00:00Z",
-      },
-      lastSignal: {
-        timestamp: "2026-02-17T19:00:06Z",
-        action: "buy",
-        confidence: 0.82,
-        longScore: 0.85,
-        shortScore: 0.12,
-        workerVotes: { M5: 0.72, M15: 0.55, M30: 0.80, H1: 0.38, H4: 0.65, consensus: 0.78 },
-        lfmThought: "Bullish structure intact. Price holding above key support.",
-      },
-      uptime: 7200,
-    },
-    {
-      id: "agent-eth-1",
-      symbol: "ETH/USD",
-      marketType: "crypto",
-      status: "thinking",
-      modelName: "SwarmBrain v9",
-      pnl: -42.30,
-      winRate: 0.45,
-      totalTrades: 8,
-      currentPosition: null,
-      lastSignal: null,
-      uptime: 5400,
-    },
-    {
-      id: "agent-eur-1",
-      symbol: "EUR/USD",
-      marketType: "forex",
-      status: "stalking",
-      modelName: "SwarmBrain v9",
-      pnl: 89.20,
-      winRate: 0.58,
-      totalTrades: 19,
-      currentPosition: null,
-      lastSignal: null,
-      uptime: 14400,
-    },
-  ];
+  try {
+    const cookieStore = await cookies();
+    const token = cookieStore.get("access_token")?.value;
 
-  return NextResponse.json({ agents, totalPnl: 371.40, activeAgents: 3 });
+    const res = await fetch(`${BACKEND_URL}/api/v1/fleet/status`, {
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Cookie: `access_token=${token}` } : {}),
+      },
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.error(`Backend fleet/status error: ${res.status} ${errorText}`);
+      return NextResponse.json(
+        { agents: [], totalPnl: 0, activeAgents: 0 },
+        { status: res.status }
+      );
+    }
+
+    const data = await res.json();
+
+    // Transform snake_case backend response to camelCase frontend format
+    const agents = (data.agents || []).map((a: Record<string, unknown>) => ({
+      id: a.id,
+      symbol: a.symbol,
+      marketType: a.market_type,
+      status: a.status,
+      modelName: a.model_name,
+      pnl: a.pnl ?? 0,
+      winRate: a.win_rate ?? 0,
+      totalTrades: a.total_trades ?? 0,
+      currentPosition: a.current_position ?? null,
+      lastSignal: a.last_signal
+        ? {
+          timestamp: (a.last_signal as Record<string, unknown>).timestamp,
+          action: (a.last_signal as Record<string, unknown>).action,
+          confidence: (a.last_signal as Record<string, unknown>).confidence,
+          longScore: (a.last_signal as Record<string, unknown>).longScore,
+          shortScore: (a.last_signal as Record<string, unknown>).shortScore,
+          workerVotes: (a.last_signal as Record<string, unknown>).workerVotes,
+          lfmThought: (a.last_signal as Record<string, unknown>).lfmThought,
+        }
+        : null,
+      uptime: a.uptime ?? 0,
+      config: a.config ?? undefined,
+    }));
+
+    return NextResponse.json({
+      agents,
+      totalPnl: data.total_pnl ?? 0,
+      activeAgents: data.active_agents ?? 0,
+    });
+  } catch (error) {
+    console.error("Failed to proxy fleet status:", error);
+    return NextResponse.json(
+      { agents: [], totalPnl: 0, activeAgents: 0 },
+      { status: 502 }
+    );
+  }
 }

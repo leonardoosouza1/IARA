@@ -42,10 +42,7 @@ export function RealTimeChart({ symbol, height = 400 }: RealTimeChartProps) {
   const initChart = useCallback(() => {
     if (!chartContainerRef.current) return;
 
-    // Cleanup previous chart
-    if (chartRef.current) {
-      chartRef.current.remove();
-    }
+
 
     const chart = createChart(chartContainerRef.current, {
       width: chartContainerRef.current.clientWidth,
@@ -109,6 +106,8 @@ export function RealTimeChart({ symbol, height = 400 }: RealTimeChartProps) {
     return () => {
       resizeObserver.disconnect();
       chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
     };
   }, [height, candles, symbol]);
 

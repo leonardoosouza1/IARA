@@ -64,8 +64,13 @@ function SidebarContent({ collapsed }: { collapsed: boolean }) {
   return (
     <div className="flex flex-col h-full">
       {/* Brand */}
-      <div className={cn("flex items-center gap-3 px-4 py-5", collapsed && "justify-center px-2")}>
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg shadow-indigo-500/20">
+      <div
+        className={cn(
+          "flex items-center gap-3 px-4 py-5",
+          collapsed && "justify-center px-2",
+        )}
+      >
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-linear-to-br from-indigo-500 to-purple-600 shadow-lg shadow-indigo-500/20">
           <Zap className="h-5 w-5 text-white" />
         </div>
         {!collapsed && (
@@ -85,7 +90,9 @@ function SidebarContent({ collapsed }: { collapsed: boolean }) {
       {/* Navigation */}
       <nav className="flex-1 px-2 py-4 space-y-1">
         {navigation.map((item) => {
-          const isActive = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(item.href));
+          const isActive =
+            pathname === item.href ||
+            (item.href !== "/dashboard" && pathname.startsWith(item.href));
           const Icon = item.icon;
 
           const linkContent = (
@@ -97,10 +104,15 @@ function SidebarContent({ collapsed }: { collapsed: boolean }) {
                 isActive
                   ? "bg-indigo-500/10 text-indigo-400 shadow-sm"
                   : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50",
-                collapsed && "justify-center px-2"
+                collapsed && "justify-center px-2",
               )}
             >
-              <Icon className={cn("h-5 w-5 shrink-0", isActive && "text-indigo-400")} />
+              <Icon
+                className={cn(
+                  "h-5 w-5 shrink-0",
+                  isActive && "text-indigo-400",
+                )}
+              />
               {!collapsed && <span className="truncate">{item.label}</span>}
             </Link>
           );
@@ -109,7 +121,10 @@ function SidebarContent({ collapsed }: { collapsed: boolean }) {
             return (
               <Tooltip key={item.href}>
                 <TooltipTrigger asChild>{linkContent}</TooltipTrigger>
-                <TooltipContent side="right" className="bg-zinc-800 text-zinc-200 border-zinc-700">
+                <TooltipContent
+                  side="right"
+                  className="bg-zinc-800 text-zinc-200 border-zinc-700"
+                >
                   {item.label}
                 </TooltipContent>
               </Tooltip>
@@ -125,16 +140,25 @@ function SidebarContent({ collapsed }: { collapsed: boolean }) {
       {/* Footer */}
       <div className={cn("px-3 py-4 space-y-3", collapsed && "px-2")}>
         {/* Connection Status */}
-        <div className={cn("flex items-center gap-2 text-xs", collapsed && "justify-center")}>
+        <div
+          className={cn(
+            "flex items-center gap-2 text-xs",
+            collapsed && "justify-center",
+          )}
+        >
           {socketConnected ? (
             <>
               <Wifi className="h-3.5 w-3.5 text-emerald-400" />
-              {!collapsed && <span className="text-emerald-400 font-medium">Connected</span>}
+              {!collapsed && (
+                <span className="text-emerald-400 font-medium">Connected</span>
+              )}
             </>
           ) : (
             <>
               <WifiOff className="h-3.5 w-3.5 text-red-400 animate-pulse" />
-              {!collapsed && <span className="text-red-400 font-medium">Disconnected</span>}
+              {!collapsed && (
+                <span className="text-red-400 font-medium">Disconnected</span>
+              )}
             </>
           )}
         </div>
@@ -153,7 +177,10 @@ function SidebarContent({ collapsed }: { collapsed: boolean }) {
             </Button>
           </TooltipTrigger>
           {collapsed && (
-            <TooltipContent side="right" className="bg-zinc-800 text-zinc-200 border-zinc-700">
+            <TooltipContent
+              side="right"
+              className="bg-zinc-800 text-zinc-200 border-zinc-700"
+            >
               Logout
             </TooltipContent>
           )}

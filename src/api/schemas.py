@@ -27,6 +27,12 @@ class TokenResponse(BaseModel):
 
 # ── Fleet ─────────────────────────────────────────────────────
 
+class AgentConfig(BaseModel):
+    pulse: str
+    label: str
+    color: str
+
+
 class AgentStatus(BaseModel):
     id: str
     symbol: str
@@ -39,6 +45,7 @@ class AgentStatus(BaseModel):
     uptime: float  # seconds
     current_position: Optional[dict] = None
     last_signal: Optional[dict] = None
+    config: Optional[AgentConfig] = None
 
 
 class FleetStatusResponse(BaseModel):

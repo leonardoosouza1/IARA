@@ -1,218 +1,334 @@
 """
-TRINITY ENGINE v8.5 "PURE LIQUID"
-=================================
-The Orchestrator. Manages the Async Loop between Swift (Liquid NN) and Deep (Liquid Foundation Model) agents.
+TRINITY ENGINE v9.7 "SWARM LIQUID"
+====================================
+The Orchestrator. Manages the live trading loop using SwarmBrain v9.7.
+
+Architecture:
+  Fast Brain (SwarmBrain): Multi-timeframe workers + Coordinator for tactical decisions
+  Slow Brain (LFM):       Optional strategic modulation via Ollama/LFM
+  Sentinel:               Safety override (news, volatility, drawdown)
+  
+Data Flow:
+  Market Tick -> Feature Engineering -> SwarmBrain Inference -> Consensus Decision -> Execution
+
+Usage:
+  engine = TrinityEngine.from_checkpoint("logs/models/best_model_v9_BTCUSD.pth")
+  engine.start()
 """
 
 import threading
 import time
 import os
+import logging
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any, List
+
 import torch
-import json
+import pandas as pd
 import requests
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
 
 # Models
-from src.brain.models.trinity_liquid import TrinityLiquidBrain
+from src.brain.models.liquid_v9 import SwarmBrain, CoordinatorConfig
+from src.brain.models.workers import WorkerConfig
+
+# Trading
+from src.trading.signal_generator import SignalEngine, TradeSignal
 
 # Tools
 from src.brain.tools.market_scanner import MarketScanner
 from src.brain.tools.alpaca_executor import AlpacaExecutor
 from src.brain.agents.sentinel_stub import SentinelStub
 
-# Utils
-import logging
+logger = logging.getLogger("TrinityEngine")
+
 
 @dataclass
 class EngineConfig:
-    lfm_model_url: str = os.getenv("OLLAMA_URL", "http://ollama:11434/api/generate") # Docker service name
+    """Configuration for the TrinityEngine."""
+    # LFM (Strategic Agent)
+    lfm_model_url: str = os.getenv("OLLAMA_URL", "http://ollama:11434/api/generate")
     lfm_model_name: str = "lfm2.5-thinking:1.2b"
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    lfm_refresh_rate: float = 60.0 # Strategic thinking every 60s
-    symbol: str = "BTC/USD" # Alpaca crypto format
+    lfm_refresh_rate: float = 60.0   # Strategic thinking every 60s
+    
+    # Trading
+    symbol: str = "BTC/USD"
     alpaca_symbol: str = "BTC/USD"
-    trade_qty: float = 0.01 # Units for crypto or shares for stocks
-    signal_threshold: float = 0.7 
+    trade_qty: float = 0.01
+    
+    # Model
+    checkpoint_path: str = "logs/models/best_model_v9_BTCUSD.pth"
+    worker_hidden: int = 128         # v9.7 "Gladiator" dims
+    coord_hidden: int = 512          # v9.7 "Gladiator" dims
+    seq_len: int = 128
+    
+    # Device
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 class SharedState:
-    """
-    Thread-Safe Container for the latest 'World View'.
-    """
-    def __init__(self, lfm_dim: int, device: str):
+    """Thread-Safe container for the latest 'World View'."""
+    
+    def __init__(self, device: str):
         self.lock = threading.Lock()
         self.device = device
-        
-        # Vectors
-        self.lfm_context = torch.zeros(1, lfm_dim).to(device)
-        self.news_vector = torch.zeros(1, 2).to(device)
-        self.last_price = 0.0
-        
-        self.last_update = 0.0
-        
-    def update_lfm(self, tensor: torch.Tensor):
-        with self.lock:
-            self.lfm_context = tensor.to(self.device).detach()
-            self.last_update = time.time()
-            
-    def update_price(self, price: float):
-        with self.lock:
-            self.last_price = price
 
-    def get_state(self):
+        # Latest market state
+        self.last_price: float = 0.0
+        self.last_signal: Optional[TradeSignal] = None
+        self.last_update: float = 0.0
+        
+        # LFM strategic context (optional)
+        self.lfm_bias: float = 0.0  # -1 (bearish) to +1 (bullish)
+        self.lfm_summary: str = ""
+
+    def update_signal(self, signal: TradeSignal, price: float):
         with self.lock:
-            return self.lfm_context.clone(), self.news_vector.clone()
+            self.last_signal = signal
+            self.last_price = price
+            self.last_update = time.time()
+
+    def update_lfm(self, bias: float, summary: str):
+        with self.lock:
+            self.lfm_bias = bias
+            self.lfm_summary = summary
+
+    def get_state(self) -> dict:
+        with self.lock:
+            return {
+                "price": self.last_price,
+                "signal": self.last_signal,
+                "lfm_bias": self.lfm_bias,
+                "lfm_summary": self.lfm_summary,
+                "last_update": self.last_update,
+            }
+
+
+
+class DataBuffer:
+    """
+    Manages a rolling window of OHLCV candles for live inference.
+    """
+    def __init__(self, max_len: int = 1000):
+        self.max_len = max_len
+        self.data: List[dict] = []
+        self.lock = threading.Lock()
+
+    def add_candle(self, candle: dict):
+        with self.lock:
+            # candle must have keys: time, open, high, low, close, volume
+            self.data.append(candle)
+            if len(self.data) > self.max_len:
+                self.data.pop(0)
+
+    def get_dataframe(self) -> pd.DataFrame:
+        with self.lock:
+            df = pd.DataFrame(self.data)
+            # Ensure columns are correct types
+            if not df.empty:
+                df["time"] = pd.to_datetime(df["time"], unit="s")
+            return df
+            
+    @property
+    def ready(self) -> bool:
+        return len(self.data) >= 128 # Minimum seq_len for v9 model
+
 
 class TrinityEngine:
-    def __init__(self, model: TrinityLiquidBrain, config: EngineConfig):
-        self.model = model
+    """
+    Live trading orchestrator using SwarmBrain v9.7.
+    
+    Combines:
+      - SignalEngine (fast inference via SwarmBrain)
+      - LFM Worker (slow strategic thread via Ollama)
+      - Sentinel (safety override)
+      - AlpacaExecutor (order dispatch)
+    """
+
+    def __init__(self, signal_engine: SignalEngine, config: EngineConfig):
+        self.signal_engine = signal_engine
         self.config = config
-        self.logger = logging.getLogger("TrinityEngine")
         self.device = torch.device(config.device)
-        self.model.to(self.device)
-        
+
         # State
-        self.state = SharedState(lfm_dim=4096, device=config.device) # Standard Llama Embedding Dim 
-        # Wait, TrinityLiquidBrain expects lfm_hidden_dim to match bridge input.
-        # If LFM outputs text, we need an embedding. 
-        # Standard Ollama embedding returns 4096 (Llama3).
-        # We assume our LFM Interface handles the embedding conversion.
-        
-        # Agents
+        self.state = SharedState(device=config.device)
+        self.start_time: float = 0.0  # Set when start() is called
+        # H4 resampling needs ~6144 M5 candles (128 seq × 4h × 12 per hour)
+        self.buffer = DataBuffer(max_len=10000)
+
+        # Tools
         self.sentinel = SentinelStub()
         self.scanner = MarketScanner()
         self.executor = AlpacaExecutor()
-        
-        self.lfm_thread = None
+
+        # Thread control
+        self.lfm_thread: Optional[threading.Thread] = None
         self.active = False
+
+    @classmethod
+    def from_checkpoint(cls, config: Optional[EngineConfig] = None) -> "TrinityEngine":
+        """Factory: build engine from checkpoint path in config."""
+        if config is None:
+            config = EngineConfig()
+
+        signal_engine = SignalEngine(
+            checkpoint_path=config.checkpoint_path,
+            worker_hidden=config.worker_hidden,
+            coord_hidden=config.coord_hidden,
+            seq_len=config.seq_len,
+            device=config.device,
+        )
+        return cls(signal_engine, config)
+
+    # ──────────────────────────────────────────
+    # Fast Path: Tactical Inference
+    # ──────────────────────────────────────────
+    def forward_tick(self, candle: dict) -> Optional[TradeSignal]:
+        """
+        Process a new M5 candle from the stream.
+
+        Args:
+            candle: Dict with {time, open, high, low, close, volume} (time in seconds)
+
+        Returns:
+            TradeSignal if inference ran, else None
+        """
+        # 1. Update Buffer
+        self.buffer.add_candle(candle)
         
+        # 2. Check if enough data
+        # We need enough history for the longest timeframe (H4)
+        if len(self.buffer.data) < 200: # Fast fail
+            return None
+            
+        # 3. Prepare DataFrame
+        df_m5 = self.buffer.get_dataframe()
+        
+        # 4. Get signal from SwarmBrain
+        signal = self.signal_engine.predict(df_m5)
+        if signal is None:
+            return None
+
+        # Update shared state
+        current_price = candle["close"]
+        self.state.update_signal(signal, current_price)
+
+        # Check Sentinel (Watchdog)
+        if not self.sentinel.is_safe():
+            logger.warning("⚠️ Sentinel BLOCKED execution: safety override active")
+            return signal
+
+        # Execute trade
+        if signal.direction == "LONG" and signal.confidence > 0.55:
+            logger.info(
+                f"🚀 LONG ({signal.confidence:.2f}) | "
+                f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait}"
+            )
+            self.executor.place_market_order(
+                self.config.alpaca_symbol, self.config.trade_qty, "BUY"
+            )
+
+        elif signal.direction == "SHORT" and signal.confidence < 0.45:
+            logger.info(
+                f"🔻 SHORT ({signal.confidence:.2f}) | "
+                f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait}"
+            )
+            self.executor.place_market_order(
+                self.config.alpaca_symbol, self.config.trade_qty, "SELL"
+            )
+
+        return signal
+
+    # ──────────────────────────────────────────
+    # Slow Path: Strategic LFM Worker
+    # ──────────────────────────────────────────
+    def _lfm_worker(self):
+        """Background thread for strategic market analysis via LFM."""
+        logger.info(f"🧠 Strategic Agent (LFM: {self.config.lfm_model_name}) Online")
+
+        while self.active:
+            start_time = time.time()
+            try:
+                price = self.state.last_price
+                if price == 0:
+                    time.sleep(1)
+                    continue
+
+                # Phase 1: Tool usage
+                prompt_scan = (
+                    f"You are a Strategic Trading AI. Current {self.config.symbol} "
+                    f"Price: {price:.2f}. Do you need to check Support/Resistance or "
+                    f"Trend? Reply with 'CHECK_SR' or 'CHECK_TREND' or 'NO_ACTION'."
+                )
+                decision = self._query_lfm(prompt_scan).strip()
+
+                tool_output = ""
+                if "CHECK_SR" in decision:
+                    logger.info("🧠 LFM: CHECK_SR")
+                    tool_output = self.scanner.check_support_resistance(
+                        self.config.symbol, price
+                    )
+                elif "CHECK_TREND" in decision:
+                    logger.info("🧠 LFM: CHECK_TREND")
+                    tool_output = self.scanner.get_trend_alignment(
+                        self.config.symbol, "4h"
+                    )
+
+                # Phase 2: Synthesize bias
+                bias = 0.0
+                if "Support" in tool_output:
+                    bias += 0.3
+                if "Resistance" in tool_output:
+                    bias -= 0.3
+                if "Bullish" in tool_output:
+                    bias += 0.2
+                if "Bearish" in tool_output:
+                    bias -= 0.2
+
+                self.state.update_lfm(bias, tool_output[:200])
+                logger.info(f"🧠 Strategic Bias Updated: {bias:+.2f}")
+
+            except Exception as e:
+                logger.error(f"LFM Worker Error: {e}")
+
+            elapsed = time.time() - start_time
+            sleep_time = max(1.0, self.config.lfm_refresh_rate - elapsed)
+            time.sleep(sleep_time)
+
     def _query_lfm(self, prompt: str) -> str:
-        """Raw Query to Ollama/LFM"""
+        """Query the Ollama/LFM endpoint."""
         try:
             payload = {
                 "model": self.config.lfm_model_name,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": 0.2}
+                "options": {"temperature": 0.2},
             }
-            res = requests.post(self.config.lfm_model_url, json=payload, timeout=30)
+            res = requests.post(
+                self.config.lfm_model_url, json=payload, timeout=30
+            )
             if res.status_code == 200:
                 return res.json().get("response", "")
             else:
-                self.logger.error(f"LFM Error: {res.status_code}")
+                logger.error(f"LFM Error: {res.status_code}")
                 return ""
         except Exception as e:
-            self.logger.error(f"LFM Connection Failed: {e}")
+            logger.error(f"LFM Connection Failed: {e}")
             return ""
 
-    def _lfm_worker(self):
-        """
-        The Strategic Agent Loop (Slow Thread).
-        Pure Liquid Architecture: LFM thinks, queries tools, and modulates LNN.
-        """
-        self.logger.info(f"🧠 Strategic Agent (LFM: {self.config.lfm_model_name}) Online")
-        
-        while self.active:
-            start_time = time.time()
-            try:
-                # 1. Get Context
-                price = self.state.last_price
-                if price == 0: 
-                    time.sleep(1)
-                    continue
-
-                # 2. Phase 1: Scan
-                # Prompt LFM to check if it needs data
-                prompt_1 = f"""
-                You are a Strategic Trading AI. Current EURUSD Price: {price:.5f}.
-                Do you need to check Support/Resistance or Trend?
-                Reply with 'CHECK_SR' or 'CHECK_TREND' or 'NO_ACTION'.
-                """
-                decision = self._query_lfm(prompt_1).strip()
-                
-                tool_output = ""
-                if "CHECK_SR" in decision:
-                    self.logger.info("🧠 LFM Requested: CHECK_SR")
-                    tool_output = self.scanner.check_support_resistance(self.config.symbol, price)
-                elif "CHECK_TREND" in decision:
-                    self.logger.info("🧠 LFM Requested: CHECK_TREND")
-                    tool_output = self.scanner.get_trend_alignment(self.config.symbol, '4h')
-                
-                # 3. Phase 2: Synthesize & Modulate
-                prompt_2 = f"""
-                Market Context: {tool_output}
-                Current Price: {price:.5f}.
-                
-                Analyze the market structure. 
-                Output a modulation vector as 32 comma-separated floats representing {{(Bullishness, Volatility_Exp, ...)}}.
-                Example: 0.5, 0.1, -0.2 ...
-                """
-                # Note: In real production we use an Embedding endpoint.
-                # Here we ask LFM to maintain a 'State Vector' via text (Simulated).
-                # OR we just get the embedding of the analysis text.
-                # Let's try getting the embedding of the validation.
-                
-                # Mocking embedding for stability if Ollama fails or returns garbage
-                # In real code: response = requests.post(..., "embedding")
-                
-                # For this demo, we generate a random vector modulated by simple sentiment parsing of the 'tool_output'
-                modulation = torch.randn(1, 4096) # Assuming mapping to LFM Dim
-                
-                if "Support" in tool_output: modulation += 0.5 # Bias Up
-                if "Resistance" in tool_output: modulation -= 0.5 # Bias Down
-                
-                self.state.update_lfm(modulation)
-                self.logger.info("🧠 Strategic Context Updated")
-
-            except Exception as e:
-                self.logger.error(f"LFM Worker Error: {e}")
-            
-            # Sleep remainder of rate
-            elapsed = time.time() - start_time
-            sleep_time = max(1.0, self.config.lfm_refresh_rate - elapsed)
-            time.sleep(sleep_time)
-
+    # ──────────────────────────────────────────
+    # Lifecycle
+    # ──────────────────────────────────────────
     def start(self):
+        """Start the engine (launches LFM background thread)."""
         self.active = True
+        self.start_time = time.time()
         self.lfm_thread = threading.Thread(target=self._lfm_worker, daemon=True)
         self.lfm_thread.start()
-        print("🚀 Liquid Trinity Engine Started")
-
-    def forward_tick(self, market_data: torch.Tensor):
-        """
-        The Tactical Loop (Fast Path).
-        """
-        # Updates state
-        current_price = market_data[0, -1, 0].item() # Mock access
-        self.state.update_price(current_price)
-        
-        # Get Modulators
-        lfm_ctx, news_vec = self.state.get_state()
-        
-        # Inference
-        market_data = market_data.to(self.device)
-        
-        with torch.no_grad():
-            decision = self.model(market_data, lfm_ctx, news_vec)
-            
-        # 4. Execution Logic (Live Signal Dispatch)
-        p_buy, p_sell, p_hold = decision[0].tolist()
-        
-        # Check Sentinel (Watchdog)
-        if not self.sentinel.is_safe():
-            self.logger.warning("⚠️ Sentinel blocked execution: DEFCON 1")
-            return decision
-
-        if p_buy > self.config.signal_threshold:
-            self.logger.info(f"🚀 BUY Signal (Conf: {p_buy:.2f}) -> Dispatching to Alpaca")
-            self.executor.place_market_order(self.config.alpaca_symbol, self.config.trade_qty, "BUY")
-        elif p_sell > self.config.signal_threshold:
-            self.logger.info(f"🚀 SELL Signal (Conf: {p_sell:.2f}) -> Dispatching to Alpaca")
-            self.executor.place_market_order(self.config.alpaca_symbol, self.config.trade_qty, "SELL")
-            
-        return decision
+        logger.info("🚀 Trinity Engine v9.7 Started")
 
     def stop(self):
+        """Gracefully stop the engine."""
         self.active = False
         if self.lfm_thread:
-            self.lfm_thread.join()
+            self.lfm_thread.join(timeout=5)
+        logger.info("🛑 Trinity Engine Stopped")

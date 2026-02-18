@@ -4,7 +4,7 @@ export interface Agent {
   id: string;
   symbol: string;
   marketType: "crypto" | "forex";
-  status: "idle" | "thinking" | "stalking" | "in_trade" | "paused" | "error";
+  status: "idle" | "active" | "thinking" | "stalking" | "in_trade" | "paused" | "error";
   modelName: string;
   pnl: number;
   winRate: number;
@@ -12,6 +12,11 @@ export interface Agent {
   currentPosition: Position | null;
   lastSignal: BrainSignal | null;
   uptime: number; // seconds
+  config?: {
+    pulse: string;
+    label: string;
+    color: string;
+  };
 }
 
 export interface Position {
@@ -40,6 +45,7 @@ export interface WorkerVotes {
   H1: number;
   H4: number;
   consensus: number; // 0 to 1
+  [key: string]: number; // Allow additional fields from backend
 }
 
 export interface MarketTick {

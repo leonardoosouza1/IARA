@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { getSocket } from "@/lib/socket";
 import { useFleetStore } from "@/hooks/use-fleet-store";
+import { api } from "@/lib/api";
 import type { MarketTick, CandleData, BrainThought, Agent } from "@/types";
 
 export function useSocket() {
@@ -22,8 +23,18 @@ export function useSocket() {
 
     const socket = getSocket();
 
+    async function fetchFleetStatus() {
+      try {
+        const res = await api.get<{ agents: Agent[] }>("/api/v1/fleet/status");
+        setAgents(res.agents);
+      } catch (err) {
+        console.error("Failed to fetch fleet status:", err);
+      }
+    }
+
     socket.on("connect", () => {
       setSocketConnected(true);
+      fetchFleetStatus();
     });
 
     socket.on("disconnect", () => {
@@ -66,5 +77,12 @@ export function useSocket() {
       socket.disconnect();
       initialized.current = false;
     };
-  }, [setSocketConnected, addTick, addCandle, addThought, updateAgent, setAgents]);
+  }, [
+    setSocketConnected,
+    addTick,
+    addCandle,
+    addThought,
+    updateAgent,
+    setAgents,
+  ]);
 }
