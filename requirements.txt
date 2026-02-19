@@ -32,3 +32,6 @@ python-jose[cryptography]
 passlib[bcrypt]
 slowapi
 ccxt
+torch
+torchvision
+torchaudio

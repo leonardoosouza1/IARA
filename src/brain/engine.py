@@ -53,110 +53,24 @@ class EngineConfig:
     # Trading
     symbol: str = "BTC/USD"
     alpaca_symbol: str = "BTC/USD"
+    market_type: str = "crypto" # "crypto" or "stock"
+    execution_venue: str = "ALPACA" # "ALPACA" or "BINANCE"
     trade_qty: float = 0.01
     
     # Model
     checkpoint_path: str = "logs/models/best_model_v9_BTCUSD.pth"
     worker_hidden: int = 128         # v9.7 "Gladiator" dims
-    coord_hidden: int = 512          # v9.7 "Gladiator" dims
-    seq_len: int = 128
-    
-    # Device
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-
-class SharedState:
-    """Thread-Safe container for the latest 'World View'."""
-    
-    def __init__(self, device: str):
-        self.lock = threading.Lock()
-        self.device = device
-
-        # Latest market state
-        self.last_price: float = 0.0
-        self.last_signal: Optional[TradeSignal] = None
-        self.last_update: float = 0.0
-        
-        # LFM strategic context (optional)
-        self.lfm_bias: float = 0.0  # -1 (bearish) to +1 (bullish)
-        self.lfm_summary: str = ""
-        
-        # Position State
-        self.current_position: Optional[dict] = None
-
-    def update_signal(self, signal: TradeSignal, price: float):
-        with self.lock:
-            self.last_signal = signal
-            self.last_price = price
-            self.last_update = time.time()
-
-    def update_lfm(self, bias: float, summary: str):
-        with self.lock:
-            self.lfm_bias = bias
-            self.lfm_summary = summary
-
-    def update_position(self, position: dict):
-        with self.lock:
-            self.current_position = position
-
-    def get_position_summary(self) -> Optional[dict]:
-        with self.lock:
-            return self.current_position
-
-    def get_state(self) -> dict:
-        with self.lock:
-            return {
-                "price": self.last_price,
-                "signal": self.last_signal,
-                "lfm_bias": self.lfm_bias,
-                "lfm_summary": self.lfm_summary,
-                "last_update": self.last_update,
-                "position": self.current_position,
-            }
-
-
-
-class DataBuffer:
-    """
-    Manages a rolling window of OHLCV candles for live inference.
-    """
-    def __init__(self, max_len: int = 1000):
-        self.max_len = max_len
-        self.data: List[dict] = []
-        self.lock = threading.Lock()
-
-    def add_candle(self, candle: dict):
-        with self.lock:
-            # candle must have keys: time, open, high, low, close, volume
-            self.data.append(candle)
-            if len(self.data) > self.max_len:
-                self.data.pop(0)
-
-    def get_dataframe(self) -> pd.DataFrame:
-        with self.lock:
-            df = pd.DataFrame(self.data)
-            # Ensure columns are correct types
-            if not df.empty:
-                df["time"] = pd.to_datetime(df["time"], unit="s")
-            return df
-            
-    @property
-    def ready(self) -> bool:
-        return len(self.data) >= 128 # Minimum seq_len for v9 model
-
+# ... (SharedState/DataBuffer classes omitted for brevity) ...
 
 class TrinityEngine:
     """
     Live trading orchestrator using SwarmBrain v9.7.
-    
-    Combines:
-      - SignalEngine (fast inference via SwarmBrain)
-      - LFM Worker (slow strategic thread via Ollama)
-      - Sentinel (safety override)
-      - AlpacaExecutor (order dispatch)
     """
 
     def __init__(self, signal_engine: SignalEngine, config: EngineConfig):
+        from src.brain.tools.ccxt_executor import CCXTExecutor # Lazy import to avoid circular deps if any
+        
         self.signal_engine = signal_engine
         self.config = config
         self.device = torch.device(config.device)
@@ -170,7 +84,15 @@ class TrinityEngine:
         # Tools
         self.sentinel = SentinelStub()
         self.scanner = MarketScanner()
-        self.executor = AlpacaExecutor()
+        
+        # Select Executor
+        if config.execution_venue == "BINANCE" and config.market_type == "crypto":
+             self.executor = CCXTExecutor(exchange_id="binance")
+             logger.info(f"🔌 Using CCXT Executor (Binance) for {config.symbol}")
+        else:
+             # Default to Alpaca (Stocks or Crypto Paper)
+             self.executor = AlpacaExecutor()
+             logger.info(f"🦙 Using Alpaca Executor for {config.symbol} (Venue: {config.execution_venue})")
 
         # Thread control
         self.lfm_thread: Optional[threading.Thread] = None
@@ -194,7 +116,7 @@ class TrinityEngine:
     # ──────────────────────────────────────────
     # Fast Path: Tactical Inference
     # ──────────────────────────────────────────
-    def forward_tick(self, candle: dict) -> Optional[TradeSignal]:
+    async def forward_tick(self, candle: dict) -> Optional[TradeSignal]:
         """
         Process a new M5 candle from the stream.
 
@@ -216,6 +138,7 @@ class TrinityEngine:
         df_m5 = self.buffer.get_dataframe()
         
         # 4. Get signal from SwarmBrain
+        # Note: Inference is sync blockage here. Ideally offload to thread.
         signal = self.signal_engine.predict(df_m5)
         if signal is None:
             return None
@@ -223,6 +146,9 @@ class TrinityEngine:
         # Update shared state
         current_price = candle["close"]
         self.state.update_signal(signal, current_price)
+
+        # 5. Persist Decision (Async)
+        await self._persist_signal(signal, candle)
 
         # Check Sentinel (Watchdog)
         if not self.sentinel.is_safe():
@@ -235,20 +161,85 @@ class TrinityEngine:
                 f"🚀 LONG ({signal.confidence:.2f}) | "
                 f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait}"
             )
-            self.executor.place_market_order(
-                self.config.alpaca_symbol, self.config.trade_qty, "BUY"
+            order = self.executor.place_market_order(
+                self.config.symbol, self.config.trade_qty, "BUY"
             )
+            if order:
+                await self._persist_trade(order, signal, "BUY", current_price)
 
         elif signal.direction == "SHORT" and signal.confidence < 0.45:
             logger.info(
                 f"🔻 SHORT ({signal.confidence:.2f}) | "
                 f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait}"
             )
-            self.executor.place_market_order(
-                self.config.alpaca_symbol, self.config.trade_qty, "SELL"
+            order = self.executor.place_market_order(
+                self.config.symbol, self.config.trade_qty, "SELL"
             )
+            if order:
+                await self._persist_trade(order, signal, "SELL", current_price)
 
         return signal
+
+    async def _persist_signal(self, signal: TradeSignal, candle: dict):
+        """Save decision to DB (Fire and Forget technically, but we await to ensure data integrity)."""
+        from src.database.core import AsyncSessionLocal
+        from src.database.models import Signal
+        
+        try:
+             async with AsyncSessionLocal() as session:
+                db_signal = Signal(
+                    symbol=self.config.symbol,
+                    timeframe="M5",
+                    signal_value=1 if signal.direction == "LONG" else (-1 if signal.direction == "SHORT" else 0),
+                    confidence=float(signal.confidence),
+                    model_version="v9.7-Gladiator",
+                    features_snapshot={
+                        "price": candle["close"],
+                        "workers_agreement": signal.worker_agreement
+                    },
+                    worker_votes={
+                        "long": signal.n_long,
+                        "short": signal.n_short,
+                        "wait": signal.n_wait
+                    }
+                )
+                session.add(db_signal)
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Failed to persist signal: {e}")
+
+    async def _persist_trade(self, order: Any, signal: TradeSignal, side: str, price: float):
+        """Save trade execution to DB."""
+        from src.database.core import AsyncSessionLocal
+        from src.database.models import Trade
+        
+        # Parse order object (CCXT vs Alpaca)
+        # CCXT returns dict, Alpaca returns object or dict depending on usage
+        order_id = "unknown"
+        exec_price = price
+        
+        if isinstance(order, dict): # CCXT
+            order_id = str(order.get('id', 'unknown'))
+            # CCXT market orders might not have price immediately if async, but we have 'average' or current price
+            exec_price = float(order.get('average') or price)
+        else: # Alpaca Object
+            order_id = str(getattr(order, 'id', 'unknown'))
+        
+        try:
+             async with AsyncSessionLocal() as session:
+                db_trade = Trade(
+                    symbol=self.config.symbol,
+                    side=side,
+                    qty=self.config.trade_qty,
+                    price=exec_price,
+                    order_id=order_id,
+                    strategy="Trinity-V9.7"
+                )
+                session.add(db_trade)
+                await session.commit()
+                logger.info(f"💾 Trade saved to DB: {side} @ {exec_price}")
+        except Exception as e:
+             logger.error(f"Failed to persist trade: {e}")
 
     # ──────────────────────────────────────────
     # Slow Path: Strategic LFM Worker

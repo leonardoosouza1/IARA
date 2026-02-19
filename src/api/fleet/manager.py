@@ -39,7 +39,7 @@ class FleetManager:
         self._initialized = True
         self.logger.info("FleetManager initialized")
 
-    def start_agent(self, symbol: str, market_type: str = "crypto", model_name: str = "SwarmBrain v9.7") -> str:
+    def start_agent(self, symbol: str, market_type: str = "crypto", model_name: str = "SwarmBrain v9.7", execution_venue: str = "ALPACA") -> str:
         """Start a new TrinityEngine agent for a symbol."""
         agent_id = f"agent-{symbol.lower().replace('/', '-')}"
         
@@ -54,7 +54,9 @@ class FleetManager:
 
         config = EngineConfig(
             symbol=symbol,
-            alpaca_symbol=symbol,
+            alpaca_symbol=symbol, # Kept for backward compat or if needed
+            market_type=market_type,
+            execution_venue=execution_venue,
             checkpoint_path=checkpoint_path,
             lfm_model_name="lfm2.5-thinking:1.2b"
         )

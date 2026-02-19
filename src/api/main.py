@@ -44,6 +44,10 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Debug: {settings.DEBUG}")
     logger.info("=" * 60)
 
+    # Initialize Database
+    from src.database.core import init_db
+    await init_db()
+
     # Start the Market Data Service (feeds engines)
     service_task = asyncio.create_task(market_service.run())
 

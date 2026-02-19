@@ -12,133 +12,121 @@ import asyncio
 import logging
 import random
 import time
+import os
 from typing import Dict, Optional, Tuple
+from datetime import datetime, timedelta
 
 from src.api.events import SocketEmitter
 from src.api.fleet.manager import fleet_manager
+
+# Alpaca Data API
+from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
+from alpaca.data.requests import CryptoBarsRequest, CryptoLatestTradeRequest, StockBarsRequest, StockLatestTradeRequest
+from alpaca.data.timeframe import TimeFrame
 
 logger = logging.getLogger("MarketDataService")
 
 # Minimum interval (seconds) between engine state emissions
 _EMIT_DEBOUNCE_S = 1.0
 
-try:
-    import ccxt.async_support as ccxt
-except ImportError:
-    ccxt = None  # Fallback handled in code
-    logger.warning("CCXT library not found. Running in simulation mode.")
-
 class MarketDataService:
     def __init__(self):
         self.active = False
-        self.symbols = ["BTC/USD", "ETH/USD", "EUR/USD"]
+        self.symbols = ["BTC/USD", "ETH/USD"] # Alpaca Crypto Symbols
         
         # Default starting prices (fallback for first tick)
-        self.prices = {"BTC/USD": 97500.0, "ETH/USD": 3800.0, "EUR/USD": 1.0850}
+        self.prices = {"BTC/USD": 97500.0, "ETH/USD": 3800.0}
         
         self.candle_start: Dict[str, float] = {}
         self.candle_ohlc: Dict[str, dict] = {}
         self._last_emit: Dict[str, float] = {}
         self.history: Dict[str, list] = {}  # In-memory history buffer
         
-        # CCXT Exchange instances
-        self.exchanges: Dict[str, any] = {}
-        self._exchange_map: Dict[str, Tuple[str, str]] = {
-            "BTC/USD": ("binance", "BTC/USDT"),
-            "ETH/USD": ("binance", "ETH/USDT"),
-            "EUR/USD": ("kraken", "EUR/USD"),
-        }
+        # Clients
+        self.crypto_client: Optional[CryptoHistoricalDataClient] = None
+        
+        self.api_key = os.getenv("ALPACA_API_KEY")
+        self.secret_key = os.getenv("ALPACA_SECRET_KEY")
 
     async def _init_exchanges(self):
-        """Initialize CCXT exchanges if available."""
-        if not ccxt:
-            return
+        """Initialize Alpaca Data Clients."""
+        if not self.api_key:
+             logger.warning("Alpaca keys missing. Running in simulation mode.")
+             return
 
         try:
-            self.exchanges["binance"] = ccxt.binance({
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'} 
-            })
-            
-            self.exchanges["kraken"] = ccxt.kraken({
-                'enableRateLimit': True
-            })
-            
-            # Load markets in parallel
-            await asyncio.gather(
-                self.exchanges["binance"].load_markets(),
-                self.exchanges["kraken"].load_markets(),
-                return_exceptions=True
-            )
-            logger.info("✅ Connected to Real Markets via CCXT (Binance + Kraken)")
+            self.crypto_client = CryptoHistoricalDataClient(self.api_key, self.secret_key)
+            logger.info("✅ Connected to Alpaca Data API (Crypto)")
         except Exception as e:
-            logger.error(f"Failed to initialize exchanges: {e}")
-            self.exchanges = {} # Fallback to simulation
+            logger.error(f"Failed to initialize Alpaca Data: {e}")
+            self.crypto_client = None
 
     async def _close_exchanges(self):
-        """Close exchange connections."""
-        for name, exchange in self.exchanges.items():
-            try:
-                await exchange.close()
-            except Exception as e:
-                logger.error(f"Error closing {name}: {e}")
-        self.exchanges.clear()
+        """Close clients (No-op for REST clients, but kept for interface compatibility)."""
+        pass
 
     def _init_fleet(self):
         """Ensure default agents are running."""
-        market_types = {"BTC/USD": "crypto", "ETH/USD": "crypto", "EUR/USD": "forex"}
         for symbol in self.symbols:
             try:
                 fleet_manager.start_agent(
                     symbol=symbol,
-                    market_type=market_types.get(symbol, "crypto"),
+                    market_type="crypto",
+                    execution_venue="ALPACA"
                 )
             except Exception as e:
                 logger.error(f"Failed to auto-start agent for {symbol}: {e}")
 
     async def _fetch_price(self, symbol: str) -> Optional[float]:
-        """Fetch latest price from exchange."""
-        if not self.exchanges:
+        """Fetch latest price from Alpaca."""
+        if not self.crypto_client:
             return None
 
-        exch_name, remote_symbol = self._exchange_map.get(symbol, ("binance", symbol))
-        exchange = self.exchanges.get(exch_name)
-        
-        if not exchange:
-            return None
-
+        # Determine asset class (simplistic check)
         try:
-            ticker = await exchange.fetch_ticker(remote_symbol)
-            return float(ticker['last'])
+             # Alpaca Crypto symbols: BTC/USD
+             req = CryptoLatestTradeRequest(symbol_or_symbols=[symbol])
+             res = self.crypto_client.get_crypto_latest_trade(req)
+             
+             if symbol in res:
+                 return float(res[symbol].price)
+             return None
+
         except Exception as e:
-            logger.warning(f"Fetch failed for {symbol} on {exch_name}: {e}")
+            # logger.warning(f"Fetch failed for {symbol}: {e}") # Reduce noise
             return None
 
     async def _fetch_and_emit_history(self, symbol: str):
-        """Fetch historical candles and emit to frontend."""
+        """Fetch historical candles from Alpaca and emit to frontend."""
         candles = []
         
-        # Try CCXT first
-        if self.exchanges:
-            exch_name, remote_symbol = self._exchange_map.get(symbol, ("binance", symbol))
-            exchange = self.exchanges.get(exch_name)
-            if exchange:
-                try:
-                    # Fetch OHLCV (1m timeframe for detailed history, limit 100)
-                    ohlcv = await exchange.fetch_ohlcv(remote_symbol, timeframe='1m', limit=100)
-                    
-                    for c in ohlcv:
-                        candles.append({
-                            "time": int(c[0] / 1000),
-                            "open": float(c[1]),
-                            "high": float(c[2]),
-                            "low": float(c[3]),
-                            "close": float(c[4]),
-                            "volume": float(c[5])
+        if self.crypto_client:
+            try:
+                # Fetch last 2 hours of 1-minute bars
+                req = CryptoBarsRequest(
+                    symbol_or_symbols=[symbol],
+                    timeframe=TimeFrame.Minute,
+                    start=datetime.now() - timedelta(hours=2),
+                    limit=100
+                )
+                bars = self.crypto_client.get_crypto_bars(req)
+                
+                if symbol in bars.df.index.get_level_values(0):
+                    df = bars.df.loc[symbol]
+                    # Convert to our format
+                    for index, row in df.iterrows():
+                        # index is timestamp
+                         candles.append({
+                            "time": int(index.timestamp()),
+                            "open": float(row["open"]),
+                            "high": float(row["high"]),
+                            "low": float(row["low"]),
+                            "close": float(row["close"]),
+                            "volume": float(row["volume"])
                         })
-                    logger.info(f"Fetched {len(candles)} historical candles for {symbol} via CCXT")
-                except Exception as e:
-                    logger.warning(f"History fetch failed for {symbol}: {e}")
+                    logger.info(f"Fetched {len(candles)} historical candles for {symbol} via Alpaca")
+            except Exception as e:
+                logger.warning(f"History fetch failed for {symbol}: {e}")
 
         # Fallback to simulation if empty
         if not candles:
@@ -166,8 +154,8 @@ class MarketDataService:
     def _generate_simulated_history(self, symbol: str, count: int) -> list:
         """Generate random walk history if API fails."""
         candles = []
-        price = self.prices.get(symbol, 100.0)
-        volatility = {"BTC/USD": 15, "ETH/USD": 1.5, "EUR/USD": 0.00005}
+        price = self.prices.get(symbol, 1000.0)
+        volatility = {"BTC/USD": 15, "ETH/USD": 1.5}
         vol = volatility.get(symbol, 1.0)
         
         now = int(time.time())
@@ -198,8 +186,11 @@ class MarketDataService:
 
     def _simulate_price_movement(self, symbol: str) -> float:
         """Fallback simulation (Random Walk)."""
-        volatility = {"BTC/USD": 15, "ETH/USD": 1.5, "EUR/USD": 0.00005}
+        volatility = {"BTC/USD": 15, "ETH/USD": 1.5}
         change = (random.random() - 0.5) * volatility.get(symbol, 1.0)
+        # Ensure we have a price
+        if symbol not in self.prices:
+             self.prices[symbol] = 1000.0
         self.prices[symbol] += change
         return self.prices[symbol]
 
@@ -214,7 +205,7 @@ class MarketDataService:
         for symbol in self.symbols:
             await self._fetch_and_emit_history(symbol)
         
-        logger.info("🚀 Market Data Service Started")
+        logger.info("🚀 Market Data Service Started (Alpaca Source)")
         
         now = time.time()
         for s in self.symbols:
@@ -260,7 +251,7 @@ class MarketDataService:
                         
                         # Emit & Feed
                         tasks.append(SocketEmitter.emit_candle_closed(symbol, candle))
-                        self._feed_engine(symbol, candle)
+                        tasks.append(self._feed_engine(symbol, candle))
                         
                         # Update History Buffer
                         if symbol not in self.history:
@@ -301,12 +292,12 @@ class MarketDataService:
             self.candle_ohlc[symbol]["low"] = min(self.candle_ohlc[symbol]["low"], price)
             self.candle_ohlc[symbol]["close"] = price
 
-    def _feed_engine(self, symbol: str, candle: dict):
+    async def _feed_engine(self, symbol: str, candle: dict):
         agent_id = f"agent-{symbol.lower().replace('/', '-')}"
         engine = fleet_manager.engines.get(agent_id)
         if engine and engine.active:
             try:
-                engine.forward_tick(candle)
+                await engine.forward_tick(candle)
             except Exception as e:
                 logger.error(f"Engine push failed for {agent_id}: {e}")
 

@@ -12,6 +12,14 @@ class SentinelStub:
     def __init__(self):
         print("🕊️ Sentinel Stub Initialized (Passive Mode)")
 
+    def is_safe(self) -> bool:
+        """
+        Check if trading is allowed.
+        Currently returns True (Passive).
+        Future: Output of FinBERT or Risk Rules.
+        """
+        return True
+
     def analyze(self, text: str) -> Dict[str, float]:
         """
         Mimics the future FinBERT output.
