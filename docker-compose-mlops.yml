@@ -76,12 +76,12 @@ services:
   # 5. O Cérebro (Trainer/Inference)
   saci-brain:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
     image: saci-trader-saci-brain:latest
     container_name: saci-brain
     volumes:
-      - .:/app
+      - ./backend:/app
     ports:
       - "8501:8501"
     environment:

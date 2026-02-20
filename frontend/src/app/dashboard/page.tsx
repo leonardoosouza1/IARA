@@ -30,6 +30,7 @@ function formatUptime(seconds: number): string {
 
 const statusConfig: Record<Agent["status"], { color: string; label: string; pulse: boolean }> = {
   idle: { color: "text-zinc-400", label: "Idle", pulse: false },
+  active: { color: "text-indigo-400", label: "Active", pulse: true },
   thinking: { color: "text-blue-400", label: "Thinking", pulse: true },
   stalking: { color: "text-amber-400", label: "Stalking", pulse: true },
   in_trade: { color: "text-emerald-400", label: "In Trade", pulse: true },

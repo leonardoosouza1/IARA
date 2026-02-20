@@ -60,6 +60,9 @@ class EngineConfig:
     # Model
     checkpoint_path: str = "logs/models/best_model_v9_BTCUSD.pth"
     worker_hidden: int = 128         # v9.7 "Gladiator" dims
+    coord_hidden: int = 512
+    seq_len: int = 128
+    device: str = "cpu"
 
 # ... (SharedState/DataBuffer classes omitted for brevity) ...
 

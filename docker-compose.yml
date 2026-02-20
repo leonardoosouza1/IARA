@@ -1,7 +1,7 @@
 services:
   saci-brain:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
     container_name: saci_trader_bot
     restart: unless-stopped
@@ -12,7 +12,7 @@ services:
     
     # Mapeamento de Volumes
     volumes:
-      - ./src:/app/src
+      - ./backend/src:/app/src
       - ./artifacts:/app/artifacts
       - ./data:/app/data
       - ./config:/app/config
