@@ -13,6 +13,8 @@ services:
     # Mapeamento de Volumes
     volumes:
       - ./backend/src:/app/src
+      - ./backend/scripts:/app/scripts
+      - ./.env:/app/.env
       - ./artifacts:/app/artifacts
       - ./data:/app/data
       - ./config:/app/config

@@ -71,7 +71,8 @@ class ModelVersion(Base):
     tag = Column(String, unique=True, index=True, nullable=False) # v9.7
     path = Column(String, nullable=False) # checkpoints/v9.7.pth
     
-    metrics = Column(JSON, nullable=True) # { "accuracy": 0.65, "profit_factor": 1.2 }
+    metrics = Column(JSON, nullable=True) # { "BTC/USD": {"accuracy": 0.65}, "ETH/USD": {"accuracy": 0.61} }
+    category_type = Column(String, default="SPECIALIST") # "SPECIALIST" (one pair) or "GENERALIST" (multi-pair)
     is_active = Column(Boolean, default=False)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
