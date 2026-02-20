@@ -39,7 +39,7 @@ class FleetManager:
         self._initialized = True
         self.logger.info("FleetManager initialized")
 
-    def start_agent(self, symbol: str, market_type: str = "crypto", model_name: str = "SwarmBrain v9.7", execution_venue: str = "ALPACA") -> str:
+    def start_agent(self, symbol: str, market_type: str = "crypto", model_name: str = "best_model_v9_EURUSD.pth", execution_venue: str = "ALPACA") -> str:
         """Start a new TrinityEngine agent for a symbol."""
         agent_id = f"agent-{symbol.lower().replace('/', '-')}"
         
@@ -50,7 +50,7 @@ class FleetManager:
                 self.engines[agent_id].start()
             return agent_id
 
-        checkpoint_path = "logs/models/best_model_v9_EURUSD.pth"
+        checkpoint_path = f"logs/models/{model_name}"
 
         config = EngineConfig(
             symbol=symbol,
@@ -127,7 +127,7 @@ class FleetManager:
                 "symbol": config.symbol,
                 "market_type": market_type,
                 "status": "active" if engine.active else "paused",
-                "model_name": "SwarmBrain v9.7",
+                "model_name": config.checkpoint_path.split("/")[-1],
                 "pnl": 0.0,
                 "win_rate": 0.0,
                 "total_trades": 0,

@@ -20,6 +20,13 @@ class Settings:
 
     # CORS
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    FRONTEND_URLS: list = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+        FRONTEND_URL
+    ]
 
     # JWT
     JWT_SECRET: str = os.getenv("JWT_SECRET", "iara-dev-secret-change-in-production-2026")

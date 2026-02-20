@@ -61,6 +61,24 @@ class Signal(Base):
         return f"<Signal(id={self.id}, {self.symbol}, val={self.signal_value}, conf={self.confidence:.2f})>"
 
 
+class AgentProfile(Base):
+    """
+    User configured trading agents.
+    """
+    __tablename__ = "agent_profiles"
+
+    id = Column(String, primary_key=True, index=True) # e.g. "agent-btc-usd"
+    symbol = Column(String, nullable=False) # e.g. "BTC/USD"
+    market_type = Column(String, nullable=False) # "crypto" or "forex"
+    model_version = Column(String, default="SwarmBrain v9.7")
+    is_active = Column(Boolean, default=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self):
+        return f"<AgentProfile({self.id}, {self.symbol}, active={self.is_active})>"
+
+
 class ModelVersion(Base):
     """
     Registry of trained models.

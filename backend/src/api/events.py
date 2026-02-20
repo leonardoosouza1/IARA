@@ -14,7 +14,7 @@ logger = logging.getLogger("iara.events")
 # Create the async Socket.IO server
 sio = socketio.AsyncServer(
     async_mode="asgi",
-    cors_allowed_origins=[settings.FRONTEND_URL],
+    cors_allowed_origins=settings.FRONTEND_URLS,
     logger=False,
     engineio_logger=False,
 )
@@ -63,7 +63,7 @@ async def subscribe(sid: str, data: dict):
     """Subscribe to a market symbol's room for live data."""
     symbol = data.get("symbol")
     if symbol:
-        sio.enter_room(sid, f"market:{symbol}")
+        await sio.enter_room(sid, f"market:{symbol}")
         logger.info(f"[WS] {sid} subscribed to market:{symbol}")
 
 
@@ -72,7 +72,7 @@ async def unsubscribe(sid: str, data: dict):
     """Unsubscribe from a symbol's room."""
     symbol = data.get("symbol")
     if symbol:
-        sio.leave_room(sid, f"market:{symbol}")
+        await sio.leave_room(sid, f"market:{symbol}")
         logger.info(f"[WS] {sid} unsubscribed from market:{symbol}")
 
 
@@ -145,15 +145,16 @@ class SocketEmitter:
             **votes,
         })
     @staticmethod
-    async def emit_historical_candles(symbol: str, candles: list):
+    async def emit_historical_candles(symbol: str, candles: list, sid: str = None):
         """Emit historical candles to frontend."""
+        target = sid if sid else f"market:{symbol}"
         await sio.emit(
             "historical_candles",
             {
                 "symbol": symbol,
                 "candles": candles,
             },
-            room=f"market:{symbol}",
+            room=target,
         )
 
 @sio.event
@@ -164,5 +165,22 @@ async def request_history(sid: str, data: dict):
     if symbol:
         history = market_service.get_history(symbol)
         if history:
-            await SocketEmitter.emit_historical_candles(symbol, history)
+            await SocketEmitter.emit_historical_candles(symbol, history, sid=sid)
+
+@sio.event
+async def manual_override(sid: str, data: dict):
+    """Handle FORCE BUY / FORCE SELL events from frontend UI."""
+    from src.api.fleet.manager import fleet_manager
+    agent_id = data.get("agent_id")
+    action = data.get("action")
+    
+    if not agent_id or not action:
+        return
+        
+    try:
+        # Pass manual override signal down to fleet manager
+        fleet_manager.manual_override(agent_id, action.lower())
+        logger.info(f"Manual Override Triggered: {action.upper()} on {agent_id}")
+    except Exception as e:
+        logger.error(f"Failed to execute manual override: {e}")
 

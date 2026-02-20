@@ -31,8 +31,8 @@ const navigation = [
     icon: LayoutDashboard,
   },
   {
-    label: "God Mode",
-    href: "/dashboard/god-mode",
+    label: "Agents",
+    href: "/dashboard/agents",
     icon: Crosshair,
   },
   {

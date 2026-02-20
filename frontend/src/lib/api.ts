@@ -67,6 +67,29 @@ class ApiClient {
     return res.json();
   }
 
+  async put<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+    const res = await fetch(this.buildUrl(path, options?.params), {
+      method: "PUT",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+    if (!res.ok) {
+      if (res.status === 401) {
+        window.location.href = "/login";
+        throw new Error("Unauthorized");
+      }
+      const errorBody = await res.json().catch(() => ({}));
+      throw new Error(errorBody.detail || `API Error: ${res.status}`);
+    }
+
+    return res.json();
+  }
+
   async delete<T>(path: string, options?: RequestOptions): Promise<T> {
     const res = await fetch(this.buildUrl(path, options?.params), {
       method: "DELETE",

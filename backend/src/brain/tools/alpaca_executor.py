@@ -46,6 +46,24 @@ class AlpacaExecutor:
             self.logger.error(f"Failed to fetch Alpaca account info: {e}")
             return {}
 
+    def execute_trade(self, action: str, symbol: str, qty: float = 0.01, price: Optional[float] = None) -> bool:
+        """
+        Generic entrypoint for the FleetManager to execute a trade.
+        action: 'buy' or 'sell'
+        Returns: True if order submitted
+        """
+        if not self.client:
+            self.logger.warning("Alpaca Client not initialized. Simulating execute_trade.")
+            return True
+            
+        try:
+            order_side = "BUY" if action.lower() == "buy" else "SELL"
+            result = self.place_market_order(symbol=symbol, volume=qty, side=order_side)
+            return result is not None
+        except Exception as e:
+            self.logger.error(f"Error executing trade {action} for {symbol}: {e}")
+            return False
+
     def place_market_order(self, symbol: str, volume: float, side: str = "BUY") -> Optional[Any]:
         """
         Places a market order via Alpaca.

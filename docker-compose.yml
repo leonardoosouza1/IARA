@@ -71,3 +71,19 @@ services:
     # To pull model automatically, one might need a custom entrypoint, 
     # but standard image entrypoint is 'serve'.
 
+  db:
+    image: ankane/pgvector:v0.5.1
+    container_name: saci_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: saci
+      POSTGRES_PASSWORD: saci_secret
+      POSTGRES_DB: saci_core
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+

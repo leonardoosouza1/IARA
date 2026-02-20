@@ -64,7 +64,54 @@ class EngineConfig:
     seq_len: int = 128
     device: str = "cpu"
 
-# ... (SharedState/DataBuffer classes omitted for brevity) ...
+    device: str = "cpu"
+
+class DataBuffer:
+    """Manages streaming market data and converts to SwarmBrain-ready DataFrames."""
+    def __init__(self, max_len: int = 10000):
+        self.max_len = max_len
+        self.data: List[dict] = []
+
+    def add_candle(self, candle: dict):
+        self.data.append(candle)
+        if len(self.data) > self.max_len:
+            self.data.pop(0)
+
+    def get_dataframe(self) -> pd.DataFrame:
+        df = pd.DataFrame(self.data)
+        return df
+
+class SharedState:
+    """Thread-safe state shared between LFM and fast SwarmBrain."""
+    def __init__(self, device: str = "cpu"):
+        self.lock = threading.Lock()
+        self.lfm_bias = 0.0
+        self.lfm_rationale = ""
+        self.last_price: float = 0.0
+        self.last_signal: Optional[TradeSignal] = None
+
+    def update_lfm(self, bias: float, rationale: str):
+        with self.lock:
+            self.lfm_bias = bias
+            self.lfm_rationale = rationale
+
+    def update_signal(self, signal: TradeSignal, current_price: float):
+        with self.lock:
+            self.last_signal = signal
+            self.last_price = current_price
+
+    def get_state(self) -> dict:
+        with self.lock:
+            return {
+                "lfm_bias": self.lfm_bias,
+                "lfm_summary": self.lfm_rationale,
+                "last_price": self.last_price,
+                "signal": self.last_signal
+            }
+            
+    def get_position_summary(self) -> Optional[dict]:
+        # Placeholder for actual position tracking in engine
+        return None
 
 class TrinityEngine:
     """

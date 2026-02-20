@@ -20,6 +20,7 @@ from src.api.config import settings
 from src.api.events import sio
 from src.api.auth.router import router as auth_router
 from src.api.fleet.router import router as fleet_router
+from src.api.agents.router import router as agents_router
 from src.api.market_data import market_service
 
 # ── Logging ───────────────────────────────────────────────────
@@ -71,7 +72,7 @@ api = FastAPI(
 # CORS — allow frontend origin
 api.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL],
+    allow_origins=settings.FRONTEND_URLS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -80,6 +81,7 @@ api.add_middleware(
 # Mount API routes under /api/v1
 api.include_router(auth_router, prefix="/api/v1")
 api.include_router(fleet_router, prefix="/api/v1")
+api.include_router(agents_router, prefix="/api/v1")
 
 
 @api.get("/api/v1/health")

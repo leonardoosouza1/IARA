@@ -8,11 +8,10 @@ import {
   Activity,
   TrendingUp,
   TrendingDown,
-  Zap,
-  Brain,
   DollarSign,
   BarChart3,
-  Clock,
+  Brain,
+  Zap,
 } from "lucide-react";
 import Link from "next/link";
 import type { Agent } from "@/types";
@@ -42,7 +41,7 @@ function AgentCard({ agent }: { agent: Agent }) {
   const config = statusConfig[agent.status];
 
   return (
-    <Link href={`/dashboard/god-mode/${agent.id}`}>
+    <Link href={`/dashboard/agents/${agent.id}`}>
       <Card className="bg-zinc-900/50 border-zinc-800/60 hover:border-indigo-500/30 hover:bg-zinc-900/80 transition-all duration-200 cursor-pointer group">
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">

@@ -39,10 +39,8 @@ export default function GodModePage({ params }: { params: Promise<{ id: string }
   const agent = useFleetStore((s) => s.agents.find((a) => a.id === id));
   const socketConnected = useFleetStore((s) => s.socketConnected);
 
-  // Loading state: true if no agent found but socket still connecting
-  // Once socket connects, if agent missing -> 404
-  // If agent found -> not loading
-  const loading = !agent && !socketConnected;
+  // Loading state: wait for socket
+  const loading = !socketConnected;
 
   // Actions
   const handleAction = async (action: "buy" | "sell") => {
@@ -76,7 +74,7 @@ export default function GodModePage({ params }: { params: Promise<{ id: string }
     );
   }
 
-  if (!agent) {
+  if (!agent && socketConnected) {
     return (
       <div className="flex h-full items-center justify-center flex-col gap-4">
         <AlertTriangle className="h-12 w-12 text-amber-500" />
@@ -85,12 +83,15 @@ export default function GodModePage({ params }: { params: Promise<{ id: string }
           The agent <span className="font-mono text-zinc-300">{id}</span> is not
           active or does not exist.
         </p>
-        <Link href="/dashboard">
+        <Link href="/dashboard/agents">
           <Button variant="outline">Return to Fleet</Button>
         </Link>
       </div>
     );
   }
+
+  // Double check agent exists for TS
+  if (!agent) return null;
 
   const votes = agent.lastSignal?.workerVotes || {
     M5: 0,
@@ -243,7 +244,7 @@ export default function GodModePage({ params }: { params: Promise<{ id: string }
               </div>
             </CardHeader>
             <CardContent className="p-2 pt-0 h-[calc(100%-3rem)]">
-              <RealTimeChart symbol={agent.symbol} height={300} />
+              <RealTimeChart symbol={agent.symbol} agent={agent} height={300} />
             </CardContent>
           </Card>
         </div>

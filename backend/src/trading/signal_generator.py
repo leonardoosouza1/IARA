@@ -101,11 +101,11 @@ class SignalEngine:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
 
         # Auto-detect input dimension from checkpoint
-        input_dim = self._detect_input_dim(checkpoint)
-        logger.info(f"  Detected input_dim={input_dim}")
+        self.input_dim = self._detect_input_dim(checkpoint)
+        logger.info(f"  Detected input_dim={self.input_dim}")
 
         worker_cfg = WorkerConfig(
-            input_dim=input_dim,
+            input_dim=self.input_dim,
             hidden_dim=worker_hidden,
             dropout=0.1,
         )
@@ -194,11 +194,27 @@ class SignalEngine:
                 # Zero-pad on the left
                 pad_len = seq_len - len(df_tf)
                 features = compute_features_from_df(df_tf, time_col="time")
-                padded = np.zeros((seq_len, features.shape[1]), dtype=np.float32)
+                
+                # Enforce input dimension from the model
+                if features.shape[-1] > self.input_dim:
+                    features = features[:, :self.input_dim]
+                elif features.shape[-1] < self.input_dim:
+                    pad = np.zeros((features.shape[0], self.input_dim - features.shape[-1]))
+                    features = np.hstack([features, pad])
+                    
+                padded = np.zeros((seq_len, self.input_dim), dtype=np.float32)
                 padded[pad_len:] = features[-seq_len:]
                 tensor = torch.tensor(padded, dtype=torch.float32)
             else:
                 features = compute_features_from_df(df_tf, time_col="time")
+                
+                # Enforce input dimension from the model
+                if features.shape[-1] > self.input_dim:
+                    features = features[:, :self.input_dim]
+                elif features.shape[-1] < self.input_dim:
+                    pad = np.zeros((features.shape[0], self.input_dim - features.shape[-1]))
+                    features = np.hstack([features, pad])
+                    
                 tensor = torch.tensor(
                     features[-seq_len:], dtype=torch.float32
                 )

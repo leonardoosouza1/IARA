@@ -18,6 +18,9 @@ from datetime import datetime, timedelta
 
 from src.api.events import SocketEmitter
 from src.api.fleet.manager import fleet_manager
+from src.database.core import AsyncSessionLocal
+from src.database.models import AgentProfile
+from sqlalchemy.future import select
 
 # Alpaca Data API
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
@@ -32,10 +35,10 @@ _EMIT_DEBOUNCE_S = 1.0
 class MarketDataService:
     def __init__(self):
         self.active = False
-        self.symbols = ["BTC/USD", "ETH/USD"] # Alpaca Crypto Symbols
+        self.symbols = ["BTC/USD", "EUR/USD"] # Default Crypto & Forex symbol
         
         # Default starting prices (fallback for first tick)
-        self.prices = {"BTC/USD": 97500.0, "ETH/USD": 3800.0}
+        self.prices = {"BTC/USD": 97500.0, "EUR/USD": 1.0500}
         
         self.candle_start: Dict[str, float] = {}
         self.candle_ohlc: Dict[str, dict] = {}
@@ -65,17 +68,29 @@ class MarketDataService:
         """Close clients (No-op for REST clients, but kept for interface compatibility)."""
         pass
 
-    def _init_fleet(self):
-        """Ensure default agents are running."""
-        for symbol in self.symbols:
-            try:
-                fleet_manager.start_agent(
-                    symbol=symbol,
-                    market_type="crypto",
-                    execution_venue="ALPACA"
-                )
-            except Exception as e:
-                logger.error(f"Failed to auto-start agent for {symbol}: {e}")
+    async def _init_fleet(self):
+        """Ensure default agents are running based on active profiles in database."""
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(select(AgentProfile).where(AgentProfile.is_active == True))
+                agents = result.scalars().all()
+                self.symbols = []
+                for a in agents:
+                    self.symbols.append(a.symbol)
+                    try:
+                        fleet_manager.start_agent(
+                            symbol=a.symbol,
+                            market_type=a.market_type,
+                            model_name=a.model_version,
+                            execution_venue="ALPACA",
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to auto-start agent for {a.symbol}: {e}")
+                
+                if not self.symbols:
+                    logger.info("No active agents found in DB. Waiting for UI configuration.")
+        except Exception as e:
+            logger.error(f"Error querying active agents: {e}")
 
     async def _fetch_price(self, symbol: str) -> Optional[float]:
         """Fetch latest price from Alpaca."""
@@ -155,7 +170,7 @@ class MarketDataService:
         """Generate random walk history if API fails."""
         candles = []
         price = self.prices.get(symbol, 1000.0)
-        volatility = {"BTC/USD": 15, "ETH/USD": 1.5}
+        volatility = {"BTC/USD": 15, "EUR/USD": 0.00015}
         vol = volatility.get(symbol, 1.0)
         
         now = int(time.time())
@@ -186,7 +201,7 @@ class MarketDataService:
 
     def _simulate_price_movement(self, symbol: str) -> float:
         """Fallback simulation (Random Walk)."""
-        volatility = {"BTC/USD": 15, "ETH/USD": 1.5}
+        volatility = {"BTC/USD": 15, "EUR/USD": 0.00015}
         change = (random.random() - 0.5) * volatility.get(symbol, 1.0)
         # Ensure we have a price
         if symbol not in self.prices:
@@ -197,7 +212,7 @@ class MarketDataService:
     async def run(self):
         """Main loop."""
         self.active = True
-        self._init_fleet()
+        await self._init_fleet()
         await self._init_exchanges()
         
         # Initial Data Load & Emit
