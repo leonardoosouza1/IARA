@@ -164,6 +164,8 @@ class TrinityEngine:
                 w = state.get("swarm.workers.M5.input_proj.weight")
                 if w is not None and hasattr(w, 'shape') and len(w.shape) == 2:
                     worker_hidden = int(w.shape[0])  # hidden_dim
+                    # We NO LONGER auto-detect input_dim to allow it to grow. 
+                    # If input_dim grows, the inner SwarmBrain handles the padding.
                     logger.info(f"  Auto-detected worker_hidden={worker_hidden} from checkpoint")
                     
                 # Detect coord_hidden from policy_head weight shape
@@ -229,10 +231,10 @@ class TrinityEngine:
             logger.warning("⚠️ Sentinel BLOCKED execution: safety override active")
             return signal
 
-        # Execute trade
-        if signal.direction == "LONG" and signal.confidence > 0.55:
+        # 🎯 High Precision Sniper Mode (Threshold > 0.82)
+        if signal.direction == "LONG" and signal.confidence > 0.82:
             logger.info(
-                f"🚀 LONG ({signal.confidence:.2f}) | "
+                f"🚀 [SNIPER] LONG ({signal.confidence:.2f}) | "
                 f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait}"
             )
             order = self.executor.place_market_order(
@@ -241,9 +243,9 @@ class TrinityEngine:
             if order:
                 await self._persist_trade(order, signal, "BUY", current_price)
 
-        elif signal.direction == "SHORT" and signal.confidence < 0.45:
+        elif signal.direction == "SHORT" and signal.confidence > 0.82:
             logger.info(
-                f"🔻 SHORT ({signal.confidence:.2f}) | "
+                f"🔻 [SNIPER] SHORT ({signal.confidence:.2f}) | "
                 f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait}"
             )
             order = self.executor.place_market_order(

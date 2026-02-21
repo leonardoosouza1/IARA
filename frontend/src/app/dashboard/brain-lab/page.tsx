@@ -45,6 +45,7 @@ interface TrainingStatus {
   message: string;
   progress: number;
   logs: string[];
+  history?: MetricPoint[];
 }
 
 interface DataStatus {
@@ -87,6 +88,85 @@ interface MetricPoint {
   pressure: number;
 }
 
+const funnyKeyframes = `
+@keyframes wobble {
+  0% { transform: translateX(0%); }
+  15% { transform: translateX(-2%) rotate(-2deg); }
+  30% { transform: translateX(2%) rotate(2deg); }
+  45% { transform: translateX(-1%) rotate(-1deg); }
+  60% { transform: translateX(1%) rotate(1deg); }
+  75% { transform: translateX(-0.5%) rotate(-0.5deg); }
+  100% { transform: translateX(0%); }
+}
+@keyframes rubberBand {
+  0% { transform: scale3d(1, 1, 1); }
+  30% { transform: scale3d(1.05, 0.95, 1); }
+  40% { transform: scale3d(0.95, 1.05, 1); }
+  50% { transform: scale3d(1.05, 0.95, 1); }
+  65% { transform: scale3d(0.98, 1.02, 1); }
+  75% { transform: scale3d(1.02, 0.98, 1); }
+  100% { transform: scale3d(1, 1, 1); }
+}
+@keyframes rollIn {
+  0% { opacity: 0; transform: translate3d(-100%, 0, 0) rotate3d(0, 0, 1, -120deg); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@keyframes jackInTheBox {
+  0% { opacity: 0; transform: scale(0.1) rotate(15deg); transform-origin: center bottom; }
+  50% { transform: rotate(-5deg); }
+  70% { transform: rotate(2deg); }
+  100% { opacity: 1; transform: scale(1); }
+}
+@keyframes bounceIn {
+  0% { opacity: 0; transform: scale3d(0.3, 0.3, 0.3); }
+  20% { transform: scale3d(1.05, 1.05, 1.05); }
+  40% { transform: scale3d(0.95, 0.95, 0.95); }
+  60% { opacity: 1; transform: scale3d(1.01, 1.01, 1.01); }
+  80% { transform: scale3d(0.99, 0.99, 0.99); }
+  100% { opacity: 1; transform: scale3d(1, 1, 1); }
+}
+@keyframes popIn {
+  0% { opacity: 0; transform: scale(0.8) translateY(10px); }
+  70% { transform: scale(1.02) translateY(-2px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes slideDrift {
+  0% { opacity: 0; transform: translateX(50px) skewX(-15deg); }
+  100% { opacity: 1; transform: translateX(0) skewX(0); }
+}
+`;
+
+const LOG_ANIMATIONS = [
+  "animate-[wobble_0.6s_ease-in-out]",
+  "animate-[rubberBand_0.8s_ease-in-out]",
+  "animate-[rollIn_0.5s_ease-out]",
+  "animate-[jackInTheBox_0.7s_ease-in-out]",
+  "animate-[bounceIn_0.8s_ease-out]",
+  "animate-[popIn_0.5s_ease-out]",
+  "animate-[slideDrift_0.5s_ease-out]",
+];
+
+function AnimatedLog({ log, isLatest }: { log: string; isLatest: boolean }) {
+  const [animClass] = useState(() => {
+    if (!isLatest) return "";
+    return LOG_ANIMATIONS[Math.floor(Math.random() * LOG_ANIMATIONS.length)];
+  });
+
+  return (
+    <div
+      className={cn(
+        "transition-all duration-300",
+        isLatest
+          ? `text-emerald-400 font-bold ${animClass}`
+          : "text-emerald-500/40",
+      )}
+    >
+      <span className="text-zinc-700 mr-2">$</span>
+      {log}
+    </div>
+  );
+}
+
 export default function BrainLabPage() {
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(
     null,
@@ -97,20 +177,22 @@ export default function BrainLabPage() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [metricHistory, setMetricHistory] = useState<MetricPoint[]>([]);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-  const dataPipeLogsEndRef = useRef<HTMLDivElement>(null);
+  const logsContainerRef = useRef<HTMLDivElement>(null);
+  const dataPipeLogsContainerRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll for Live Telemetry Logs
   useEffect(() => {
-    if (logsEndRef.current) {
-      logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    if (logsContainerRef.current) {
+      logsContainerRef.current.scrollTop =
+        logsContainerRef.current.scrollHeight;
     }
   }, [trainingStatus?.logs]);
 
   // Auto-scroll for Data Pipe Logs
   useEffect(() => {
-    if (dataPipeLogsEndRef.current) {
-      dataPipeLogsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    if (dataPipeLogsContainerRef.current) {
+      dataPipeLogsContainerRef.current.scrollTop =
+        dataPipeLogsContainerRef.current.scrollHeight;
     }
   }, [dataStatus?.logs]);
 
@@ -123,6 +205,7 @@ export default function BrainLabPage() {
     learning_rate: 0.0001,
     data_source: "journal", // "journal" or "historical"
     dataset_name: "",
+    save_as: "active_model.pth",
   });
 
   const [fetchRequest, setFetchRequest] = useState({
@@ -147,33 +230,9 @@ export default function BrainLabPage() {
       setDataStatus(dataStatusRes);
       setDatasets(datasetsRes || []);
 
-      // Update Metric History for Chart
-      if (statusRes.is_training && statusRes.last_loss !== null) {
-        setMetricHistory((prev) => {
-          const last = prev[prev.length - 1];
-          // Only add if it's a new batch to avoid redundant points
-          if (
-            last?.loss === statusRes.last_loss &&
-            last?.acc === statusRes.last_acc
-          )
-            return prev;
-
-          const newHistory = [
-            ...prev,
-            {
-              time: new Date().toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-              }),
-              loss: statusRes.last_loss as number,
-              acc: statusRes.last_acc || 0,
-              prec: statusRes.last_prec || 0,
-              pressure: statusRes.pressure || 1.0,
-            },
-          ];
-          return newHistory.slice(-50); // Keep last 50 points
-        });
+      // Update Metric History for Chart directly from backend
+      if (statusRes.history && statusRes.history.length > 0) {
+        setMetricHistory(statusRes.history);
       }
 
       // Auto-select first dataset if none selected and source is historical
@@ -194,6 +253,43 @@ export default function BrainLabPage() {
       setLoading(false);
     }
   }, [loading, protocol.data_source, protocol.dataset_name]);
+
+  const handleExportLogs = async () => {
+    if (
+      !trainingStatus?.is_training &&
+      (!trainingStatus?.logs || trainingStatus.logs.length === 0)
+    ) {
+      toast.error("No training data available to export");
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/brain/export`,
+      );
+      if (!response.ok) throw new Error("Failed to fetch logs from server");
+
+      const logText = await response.text();
+      if (!logText) {
+        toast.error("Log history is empty");
+        return;
+      }
+
+      const blob = new Blob([logText], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `saci-training-full-history-${new Date().toISOString().slice(0, 10)}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast.success("Complete log history exported successfully!");
+    } catch (error) {
+      console.error("Export failed:", error);
+      toast.error("Failed to download complete logs.");
+    }
+  };
 
   useEffect(() => {
     fetchData();
@@ -279,6 +375,7 @@ export default function BrainLabPage() {
 
   return (
     <div className="p-6 space-y-8 max-w-7xl mx-auto pb-20">
+      <style dangerouslySetInnerHTML={{ __html: funnyKeyframes }} />
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 mb-1">
@@ -457,6 +554,24 @@ export default function BrainLabPage() {
               </select>
             </div>
 
+            <div className="space-y-2 pb-2">
+              <label className="text-[10px] uppercase font-bold text-emerald-500 flex items-center gap-2">
+                Save As (New Checkpoint)
+              </label>
+              <input
+                type="text"
+                className="w-full bg-zinc-950 border border-emerald-900/50 rounded px-2 py-1.5 text-xs text-emerald-200 placeholder:text-zinc-600 focus:border-emerald-500 outline-none"
+                value={protocol.save_as}
+                onChange={(e) =>
+                  setProtocol({
+                    ...protocol,
+                    save_as: e.target.value,
+                  })
+                }
+                placeholder="e.g. active_model.pth"
+              />
+            </div>
+
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <label className="text-[10px] uppercase font-bold text-zinc-500">
@@ -557,7 +672,19 @@ export default function BrainLabPage() {
               Live Telemetry
             </CardTitle>
             <div className="flex items-center gap-4">
-              <span className="text-[10px] font-mono text-zinc-500">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-[10px] bg-zinc-950/50 border-zinc-800 text-zinc-400 hover:text-indigo-400 hover:border-indigo-500/50"
+                onClick={handleExportLogs}
+                disabled={
+                  !trainingStatus?.logs || trainingStatus.logs.length === 0
+                }
+              >
+                <Download className="mr-1.5 h-3 w-3" />
+                Export Logs
+              </Button>
+              <span className="text-[10px] font-mono text-zinc-500 hidden md:inline">
                 {trainingStatus?.is_training ? "COMPUTING" : "IDLE"}
               </span>
               <div className="w-32 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
@@ -568,27 +695,22 @@ export default function BrainLabPage() {
               </div>
             </div>
           </CardHeader>
-          <CardContent className="p-4 flex flex-col h-[500px] gap-4">
+          <CardContent className="p-4 flex flex-col h-[700px] gap-4">
             <div className="flex gap-4 h-1/2">
               {/* Visual Console */}
-              <div className="flex-1 bg-black/60 rounded-lg p-4 font-mono text-[10px] overflow-y-auto space-y-1 border border-zinc-800 shadow-inner text-emerald-400/90 [scrollbar-width:none]">
+              <div
+                ref={logsContainerRef}
+                className="flex-1 bg-black/60 rounded-lg p-4 font-mono text-[10px] overflow-y-auto space-y-1 border border-zinc-800 shadow-inner text-emerald-400/90 [scrollbar-width:none]"
+              >
                 {trainingStatus?.logs && trainingStatus.logs.length > 0 ? (
                   <>
                     {trainingStatus.logs.map((log, i) => (
-                      <div
-                        key={i}
-                        className={cn(
-                          "transition-opacity duration-300",
-                          i === trainingStatus.logs.length - 1
-                            ? "text-emerald-400 font-bold"
-                            : "text-emerald-500/40",
-                        )}
-                      >
-                        <span className="text-zinc-700 mr-2">$</span>
-                        {log}
-                      </div>
+                      <AnimatedLog
+                        key={`${i}-${log.substring(0, 20)}`}
+                        log={log}
+                        isLatest={i === trainingStatus.logs.length - 1}
+                      />
                     ))}
-                    <div ref={logsEndRef} />
                   </>
                 ) : (
                   <div className="text-zinc-700 italic text-xs">
@@ -677,9 +799,30 @@ export default function BrainLabPage() {
                     stroke="#18181b"
                     vertical={false}
                   />
-                  <XAxis dataKey="time" hide />
-                  <YAxis yAxisId="left" hide domain={[0, "auto"]} />
-                  <YAxis yAxisId="right" hide domain={[0, 1]} />
+                  <XAxis
+                    dataKey="time"
+                    stroke="#52525b"
+                    fontSize={9}
+                    tickMargin={10}
+                    minTickGap={20}
+                  />
+                  <YAxis
+                    yAxisId="left"
+                    domain={[0, (dataMax) => Math.max(dataMax * 3, 2)]}
+                    stroke="#6366f1"
+                    fontSize={9}
+                    tickFormatter={(value) => value.toFixed(2)}
+                    width={40}
+                  />
+                  <YAxis
+                    yAxisId="right"
+                    orientation="right"
+                    domain={[0, 1]}
+                    stroke="#10b981"
+                    fontSize={9}
+                    tickFormatter={(value) => `${(value * 100).toFixed(0)}%`}
+                    width={40}
+                  />
                   <Tooltip
                     contentStyle={{
                       backgroundColor: "#09090b",
@@ -688,6 +831,7 @@ export default function BrainLabPage() {
                       fontSize: "10px",
                     }}
                     itemStyle={{ padding: "0px" }}
+                    labelStyle={{ color: "#a1a1aa", marginBottom: "4px" }}
                   />
                   <Area
                     yAxisId="left"
@@ -819,16 +963,22 @@ export default function BrainLabPage() {
               </div>
 
               {/* Data Fetch Console */}
-              <div className="p-3 rounded-lg bg-black/40 border border-zinc-800 h-32 overflow-y-auto font-mono text-[9px] text-zinc-600 space-y-1 scrollbar-hide">
+              <div
+                ref={dataPipeLogsContainerRef}
+                className="p-3 rounded-lg bg-black/40 border border-zinc-800 h-32 overflow-y-auto font-mono text-[9px] text-zinc-600 space-y-1 scrollbar-hide"
+              >
                 <p className="text-zinc-600 mb-1 border-b border-zinc-800 pb-1 flex items-center gap-1">
                   <Terminal className="h-2.5 w-2.5" /> DATAPIPE_LOG
                 </p>
                 {dataStatus?.logs && dataStatus.logs.length > 0 ? (
                   <>
                     {dataStatus.logs.map((log, i) => (
-                      <div key={i}>{log}</div>
+                      <AnimatedLog
+                        key={`${i}-${log.substring(0, 20)}`}
+                        log={log}
+                        isLatest={i === dataStatus.logs.length - 1}
+                      />
                     ))}
-                    <div ref={dataPipeLogsEndRef} />
                   </>
                 ) : (
                   <div className="italic text-zinc-800">No active process</div>

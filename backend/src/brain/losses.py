@@ -206,12 +206,42 @@ class ConsensusLoss(nn.Module):
         return total_penalty.mean()
 
 
+class AsymmetricCrossEntropyLoss(nn.Module):
+    """
+    Custom Loss for Sniper Mode (High Precision).
+    Penalizes False Positives (acting on noise, target=Wait) heavier than 
+    False Negatives (missing a trade, target=Long/Short).
+    
+    Args:
+        weight_fp: Weight penalty when target is Wait (class 2)
+        weight_fn: Weight penalty when target is Action (class 0 or 1)
+        label_smoothing: CrossEntropy label smoothing
+    """
+    def __init__(self, weight_fp: float = 3.0, weight_fn: float = 1.0, label_smoothing: float = 0.1):
+        super().__init__()
+        # weights: [Long, Short, Wait] -> Target 2 is Wait
+        self.weights = torch.tensor([weight_fn, weight_fn, weight_fp], dtype=torch.float32)
+        self.label_smoothing = label_smoothing
+        
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if self.weights.device != logits.device:
+            self.weights = self.weights.to(logits.device)
+            
+        # reduction='none' so we can apply optional sample weights
+        loss = F.cross_entropy(logits, targets.long(), weight=self.weights, label_smoothing=self.label_smoothing, reduction='none')
+        
+        if weight is not None:
+            loss = loss * weight
+            
+        return loss.mean()
+
+
 class SwarmLoss(nn.Module):
     """
     Complete loss function for Swarm Intelligence training.
     
     Combines:
-    1. AsymmetricFocalLoss for Coordinator
+    1. AsymmetricCrossEntropyLoss for Coordinator (Sniper Mode)
     2. CrossEntropyLoss for Workers (auxiliary)
     3. ConsensusLoss for regularization
     
@@ -221,7 +251,6 @@ class SwarmLoss(nn.Module):
     Args:
         alpha: Focal loss alpha (default 0.75)
         gamma: Focal loss gamma (default 2.0)
-        aux_weight: Weight for auxiliary loss λ (default 0.4)
         consensus_weight: Weight for consensus loss β (default 0.1)
         label_smoothing: Smoothing for worker loss (default 0.1)
     """
@@ -240,8 +269,8 @@ class SwarmLoss(nn.Module):
         # Initialized to favor Coordinator (Index 0) at approx 85%
         self.weight_logits = nn.Parameter(torch.tensor([2.5, 0.0, 0.0]))
         
-        # Sub-losses
-        self.coord_loss = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+        # Sub-losses (Sniper Mode Asymmetric Loss)
+        self.coord_loss = AsymmetricCrossEntropyLoss(weight_fp=3.0, weight_fn=1.0, label_smoothing=label_smoothing)
         self.focal_alt = AsymmetricFocalLoss(alpha=alpha, gamma=gamma) # Still keep for binary auxiliary if needed
         self.worker_loss = WorkerAuxiliaryLoss(
             num_classes=3, 
@@ -262,14 +291,10 @@ class SwarmLoss(nn.Module):
         """
         # 1. Compute individual losses
         
-        # Coordinator is now 3-class {Long, Short, Neutral}
+        # Coordinator is now 3-class {Long, Short, Neutral} mapped via Asymmetric Loss
         # coord_logits shape: [Batch, 3]
         # targets shape: [Batch]
-        l_coord = F.cross_entropy(coord_logits, targets.long(), reduction='none')
-        if weight is not None:
-             l_coord = (l_coord * weight).mean()
-        else:
-             l_coord = l_coord.mean()
+        l_coord = self.coord_loss(coord_logits, targets, weight=weight)
              
         l_workers = self.worker_loss(worker_logits, targets.long())
         l_consensus = self.consensus_loss(coord_logits, worker_logits)

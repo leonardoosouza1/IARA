@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import desc
+from fastapi.responses import PlainTextResponse
 
 from src.database.core import get_db
 from src.database.models import Trade, Signal, ModelVersion
@@ -34,6 +35,7 @@ training_state = {
     "message": "Idle",
     "progress": 0,  # 0 to 100
     "logs": [],     # Recent training logs
+    "all_logs": [], # Full history for export
     "stop_requested": False,
 }
 
@@ -55,6 +57,7 @@ class TrainingProtocol(BaseModel):
     workers: int = 8
     data_source: str = "journal" # "journal", "historical"
     dataset_name: Optional[str] = None
+    save_as: Optional[str] = "active_model.pth"
 
 class FetchRequest(BaseModel):
     symbol: str = "BTC/USD"
@@ -67,11 +70,15 @@ def run_training_background(protocol: Dict[str, Any]):
         training_state["is_training"] = True
         training_state["progress"] = 0
         training_state["logs"] = []
+        training_state["all_logs"] = []
+        training_state["history"] = []
         training_state["stop_requested"] = False
         training_state["message"] = f"Initializing {protocol['mode']} protocol..."
         
         def log_callback(msg: str):
-            training_state["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            log_str = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+            training_state["all_logs"].append(log_str)
+            training_state["logs"].append(log_str)
             if len(training_state["logs"]) > 50:
                 training_state["logs"].pop(0)
             training_state["message"] = msg
@@ -97,11 +104,31 @@ def run_training_background(protocol: Dict[str, Any]):
             if pressure_match:
                 training_state["pressure"] = float(pressure_match.group(1))
 
+            # Store in history if it's a metric update
+            if loss_match:
+                training_state["history"].append({
+                    "time": datetime.now().strftime('%H:%M:%S'),
+                    "loss": training_state["last_loss"],
+                    "acc": training_state["last_acc"] or 0,
+                    "prec": training_state["last_prec"] or 0,
+                    "pressure": training_state.get("pressure", 1.0)
+                })
+                # Keep last 50 points to prevent memory leak
+                if len(training_state["history"]) > 50:
+                    training_state["history"].pop(0)
+
         checkpoint_name = protocol.get("base_model")
         checkpoint_path = f"logs/models/{checkpoint_name}" if checkpoint_name else None
         
+        save_name = protocol.get("save_as", "active_model.pth")
+        if not save_name.endswith('.pth'):
+            save_name += '.pth'
+        save_path = f"logs/models/{save_name}"
+
         learner = ContinuousLearner(checkpoint_path=checkpoint_path)
+        learner.checkpoint_path = save_path # Override where it saves
         log_callback(f"Compute device detected: {learner.device}")
+        log_callback(f"Target Save Location: {save_name}")
         
         # Override learner params from protocol
         learner.epochs = protocol["epochs"]
@@ -193,6 +220,10 @@ async def stop_training():
     training_state["stop_requested"] = True
     training_state["message"] = "⏳ Stop requested. Finishing current batch and saving best model..."
     return {"message": "Stop signal sent. Training will halt after current batch."}
+
+@router.get("/export")
+async def export_logs():
+    return PlainTextResponse("\n".join(training_state.get("all_logs", [])))
 
 @router.post("/data/fetch")
 async def trigger_data_fetch(request: FetchRequest):

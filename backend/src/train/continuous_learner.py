@@ -51,11 +51,11 @@ class ContinuousLearner:
         SyncSessionLocal = sessionmaker(bind=sync_engine)
         self.db: Session = SyncSessionLocal()
         
-        # Defaults for architecture (Golden v10.0)
+        # Defaults for architecture (Golden v10.0 / Sniper Mode)
         self.worker_hidden = 64 # Matches Golden active_model.pth
         self.coord_hidden = 256 # Matches Golden active_model.pth
         self.seq_len = 128
-        self.input_dim = 12 # Standard for v9.7 checkpoints
+        self.input_dim = 14 # Grown from 12 to 14 (Added ATR and Volume VMA)
         
         # Hyperparameters (Gladiator v9.7 Presets)
         self.epochs = 5
@@ -94,11 +94,21 @@ class ContinuousLearner:
         if self.checkpoint_path and os.path.exists(self.checkpoint_path):
             try:
                 state = torch.load(self.checkpoint_path, map_location=self.device)
-                if 'model_state_dict' in state:
-                    model.load_state_dict(state['model_state_dict'], strict=False)
-                else:
-                    model.load_state_dict(state, strict=False)
-                logger.info(f"Loaded existing model from {self.checkpoint_path}")
+                state_dict = state.get('model_state_dict', state)
+                
+                # 🚀 Phase 3: Dynamic Padding for Input Growth
+                # If loading older v9.7 weights (12 dims) into v10.0 model (14 dims)
+                for name, param in model.named_parameters():
+                    if name in state_dict and any(key in name for key in ["input_proj.weight", "cfc.x_proj.weight", "res_proj.weight"]):
+                        old_w = state_dict[name]
+                        if len(old_w.shape) == 2 and old_w.shape[1] < param.shape[1]:
+                            logger.info(f"🦾 Zero-padding {name} from {old_w.shape[1]} to {param.shape[1]} dims")
+                            new_w = torch.zeros_like(param)
+                            new_w[:, :old_w.shape[1]] = old_w
+                            state_dict[name] = new_w
+
+                model.load_state_dict(state_dict, strict=False)
+                logger.info(f"Loaded existing model from {self.checkpoint_path} (strict=False)")
             except Exception as e:
                 logger.error(f"Failed to load checkpoint: {e}")
         else:
@@ -153,8 +163,24 @@ class ContinuousLearner:
                 if features.shape[1] > self.seq_len:
                     features = features[:, -self.seq_len:, :]
                 
-                if features.shape[2] > 12:
-                    features = features[:, :, :12]
+                
+                # 🚀 Dynamic Tensor Padding for Backwards Compatibility
+                # Old snapshots typically had 22 or 26 features, or were already truncated to 12.
+                is_old_snapshot = (features.shape[-1] in [12, 22, 26])
+                
+                if is_old_snapshot:
+                    core_feats = features[:, :, :12]
+                    if self.input_dim > 12:
+                        padding = torch.zeros(features.shape[0], features.shape[1], self.input_dim - 12, dtype=features.dtype, device=features.device)
+                        features = torch.cat([core_feats, padding], dim=-1)
+                    else:
+                        features = core_feats
+                else:
+                    if features.shape[-1] > self.input_dim:
+                        features = features[:, :, :self.input_dim]
+                    elif features.shape[-1] < self.input_dim:
+                        padding = torch.zeros(features.shape[0], features.shape[1], self.input_dim - features.shape[-1], dtype=features.dtype, device=features.device)
+                        features = torch.cat([features, padding], dim=-1)
                     
                 X.append(features.to(self.device))
                 Y.append(target_scalar)
@@ -247,11 +273,8 @@ class ContinuousLearner:
                     logits, worker_logits, _, _ = self.model(x_dict)
                     
                     # 🚀 Phase 11: Swarm v9.7 Targets {0: Long, 1: Short, 2: Wait}
-                    # Give 3x weight to "Wait" actions (which represent error corrections in Journal)
-                    sample_weights = torch.ones_like(batch_y).float()
-                    sample_weights[batch_y == 2] *= 3.0 
-                    
-                    loss_dict = self.criterion(logits, worker_logits, batch_y, weight=sample_weights)
+                    # 🎯 Phase 3: High Precision (Sniper Mode) - Asymmetry handled directly by SwarmLoss
+                    loss_dict = self.criterion(logits, worker_logits, batch_y)
                     loss = loss_dict["total"]
 
                 if torch.isnan(loss):
@@ -327,8 +350,24 @@ class ContinuousLearner:
                 X = data['X']
                 y = data['y']
                 
-                if X.shape[-1] > 12:
-                    X = X[:, :, :12]
+                
+                # 🚀 Dynamic Tensor Padding for Older Datasets
+                # Old shards (v9) have 26 cols, or were truncated to 12. New shards (v10) have 28 cols.
+                is_old_shard = (X.shape[-1] in [12, 22, 26])
+                
+                if is_old_shard:
+                    core_X = X[:, :, :12]
+                    if self.input_dim > 12:
+                        padding = torch.zeros(X.shape[0], X.shape[1], self.input_dim - 12, dtype=X.dtype, device=X.device)
+                        X = torch.cat([core_X, padding], dim=-1)
+                    else:
+                        X = core_X
+                else:
+                    if X.shape[-1] > self.input_dim:
+                        X = X[:, :, :self.input_dim]
+                    elif X.shape[-1] < self.input_dim:
+                        padding = torch.zeros(X.shape[0], X.shape[1], self.input_dim - X.shape[-1], dtype=X.dtype, device=X.device)
+                        X = torch.cat([X, padding], dim=-1)
                 
                 num_batches_in_shard = max(1, (len(X) + self.batch_size - 1) // self.batch_size)
                 
@@ -458,8 +497,22 @@ class ContinuousLearner:
                         v_data = torch.load(os.path.join(val_shard_dir, v_shard), map_location='cpu')
                         v_X, v_y = v_data['X'].to(self.device), v_data['y'].to(self.device).long()
                         
-                        if v_X.shape[-1] > 12:
-                            v_X = v_X[:, :, :12]
+                        # 🚀 Dynamic Tensor Padding for Validation Datasets
+                        is_old_val_shard = (v_X.shape[-1] in [12, 22, 26])
+                        
+                        if is_old_val_shard:
+                            core_v_X = v_X[:, :, :12]
+                            if self.input_dim > 12:
+                                padding = torch.zeros(v_X.shape[0], v_X.shape[1], self.input_dim - 12, dtype=v_X.dtype, device=v_X.device)
+                                v_X = torch.cat([core_v_X, padding], dim=-1)
+                            else:
+                                v_X = core_v_X
+                        else:
+                            if v_X.shape[-1] > self.input_dim:
+                                v_X = v_X[:, :, :self.input_dim]
+                            elif v_X.shape[-1] < self.input_dim:
+                                padding = torch.zeros(v_X.shape[0], v_X.shape[1], self.input_dim - v_X.shape[-1], dtype=v_X.dtype, device=v_X.device)
+                                v_X = torch.cat([v_X, padding], dim=-1)
                         
                         v_x_dict = self._simulate_timeframes(v_X)
                         v_logits, v_worker_logits, _, _ = self.model(v_x_dict)
