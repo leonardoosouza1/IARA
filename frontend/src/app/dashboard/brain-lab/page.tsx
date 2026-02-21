@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -57,6 +57,10 @@ interface ModelInfo {
   name: string;
   size: string;
   last_modified: string;
+  input_dim?: number | string;
+  worker_hidden?: number | string;
+  coord_hidden?: number | string;
+  num_params?: number | string;
 }
 
 interface DatasetInfo {
@@ -93,6 +97,22 @@ export default function BrainLabPage() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [metricHistory, setMetricHistory] = useState<MetricPoint[]>([]);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+  const dataPipeLogsEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll for Live Telemetry Logs
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [trainingStatus?.logs]);
+
+  // Auto-scroll for Data Pipe Logs
+  useEffect(() => {
+    if (dataPipeLogsEndRef.current) {
+      dataPipeLogsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [dataStatus?.logs]);
 
   const [protocol, setProtocol] = useState({
     mode: "finetune",
@@ -553,20 +573,23 @@ export default function BrainLabPage() {
               {/* Visual Console */}
               <div className="flex-1 bg-black/60 rounded-lg p-4 font-mono text-[10px] overflow-y-auto space-y-1 border border-zinc-800 shadow-inner text-emerald-400/90 [scrollbar-width:none]">
                 {trainingStatus?.logs && trainingStatus.logs.length > 0 ? (
-                  trainingStatus.logs.map((log, i) => (
-                    <div
-                      key={i}
-                      className={cn(
-                        "transition-opacity duration-300",
-                        i === trainingStatus.logs.length - 1
-                          ? "text-emerald-400 font-bold"
-                          : "text-emerald-500/40",
-                      )}
-                    >
-                      <span className="text-zinc-700 mr-2">$</span>
-                      {log}
-                    </div>
-                  ))
+                  <>
+                    {trainingStatus.logs.map((log, i) => (
+                      <div
+                        key={i}
+                        className={cn(
+                          "transition-opacity duration-300",
+                          i === trainingStatus.logs.length - 1
+                            ? "text-emerald-400 font-bold"
+                            : "text-emerald-500/40",
+                        )}
+                      >
+                        <span className="text-zinc-700 mr-2">$</span>
+                        {log}
+                      </div>
+                    ))}
+                    <div ref={logsEndRef} />
+                  </>
                 ) : (
                   <div className="text-zinc-700 italic text-xs">
                     Waiting for protocol execution command...
@@ -800,7 +823,14 @@ export default function BrainLabPage() {
                 <p className="text-zinc-600 mb-1 border-b border-zinc-800 pb-1 flex items-center gap-1">
                   <Terminal className="h-2.5 w-2.5" /> DATAPIPE_LOG
                 </p>
-                {dataStatus?.logs.map((log, i) => <div key={i}>{log}</div>) || (
+                {dataStatus?.logs && dataStatus.logs.length > 0 ? (
+                  <>
+                    {dataStatus.logs.map((log, i) => (
+                      <div key={i}>{log}</div>
+                    ))}
+                    <div ref={dataPipeLogsEndRef} />
+                  </>
+                ) : (
                   <div className="italic text-zinc-800">No active process</div>
                 )}
               </div>
@@ -897,6 +927,36 @@ export default function BrainLabPage() {
                             SELECT
                           </Badge>
                         )}
+                      </div>
+                    </div>
+
+                    {/* Model Architecture Details */}
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 mb-2 text-[9px] font-mono">
+                      <div className="flex justify-between">
+                        <span className="text-zinc-600">input</span>
+                        <span className="text-indigo-400">
+                          {m.input_dim ?? "?"}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-zinc-600">worker</span>
+                        <span className="text-amber-400">
+                          {m.worker_hidden ?? "?"}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-zinc-600">coord</span>
+                        <span className="text-emerald-400">
+                          {m.coord_hidden ?? "?"}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-zinc-600">params</span>
+                        <span className="text-zinc-300">
+                          {typeof m.num_params === "number"
+                            ? `${(m.num_params / 1000).toFixed(0)}K`
+                            : "?"}
+                        </span>
                       </div>
                     </div>
 

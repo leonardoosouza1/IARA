@@ -24,7 +24,9 @@ import numpy as np
 import pandas as pd
 import torch
 
-from src.brain.models.liquid_v9 import SwarmBrain, CoordinatorConfig
+from src.brain.models.liquid_v9 import SwarmBrain as SwarmBrainV9
+from src.brain.models.liquid_v10 import SwarmBrain as SwarmBrainV10
+from src.brain.models.liquid_v9 import CoordinatorConfig
 from src.brain.models.workers import WorkerConfig
 from src.data.indicators import compute_features_from_df, NUM_FEATURES
 
@@ -116,7 +118,11 @@ class SignalEngine:
             dropout=0.3,
         )
 
-        self.model = SwarmBrain(worker_cfg, coord_cfg).to(self.device)
+        if "v10" in path.lower():
+            self.model = SwarmBrainV10(worker_cfg, coord_cfg).to(self.device)
+        else:
+            self.model = SwarmBrainV9(worker_cfg, coord_cfg).to(self.device)
+        
         self.model.load_state_dict(checkpoint, strict=False)
         self.model.eval()
         logger.info("  ✅ SwarmBrain loaded and ready!")
@@ -187,37 +193,38 @@ class SignalEngine:
                     .rename(columns={"index": "time"})
                 )
 
+            features = compute_features_from_df(df_tf, time_col="time")
+            
+            # Enforce input dimension from the model (Base part only)
+            # v10.0 uses 12 base + 42 L2 = 54. v9.7 uses 22 base.
+            base_dim = self.input_dim - 42 if self.input_dim > 42 else self.input_dim
+            
+            if features.shape[-1] > base_dim:
+                features = features[:, :base_dim]
+            elif features.shape[-1] < base_dim:
+                pad = np.zeros((features.shape[0], base_dim - features.shape[-1]))
+                features = np.hstack([features, pad])
+            
+            # Handle sequence length (Padding vs Slicing)
             if len(df_tf) < seq_len:
-                logger.warning(
-                    f"{tf_key}: only {len(df_tf)} candles (need {seq_len}), padding"
-                )
-                # Zero-pad on the left
                 pad_len = seq_len - len(df_tf)
-                features = compute_features_from_df(df_tf, time_col="time")
-                
-                # Enforce input dimension from the model
-                if features.shape[-1] > self.input_dim:
-                    features = features[:, :self.input_dim]
-                elif features.shape[-1] < self.input_dim:
-                    pad = np.zeros((features.shape[0], self.input_dim - features.shape[-1]))
-                    features = np.hstack([features, pad])
-                    
-                padded = np.zeros((seq_len, self.input_dim), dtype=np.float32)
-                padded[pad_len:] = features[-seq_len:]
+                padded = np.zeros((seq_len, base_dim), dtype=np.float32)
+                padded[pad_len:] = features
                 tensor = torch.tensor(padded, dtype=torch.float32)
             else:
-                features = compute_features_from_df(df_tf, time_col="time")
+                tensor = torch.tensor(features[-seq_len:], dtype=torch.float32)
                 
-                # Enforce input dimension from the model
-                if features.shape[-1] > self.input_dim:
-                    features = features[:, :self.input_dim]
-                elif features.shape[-1] < self.input_dim:
-                    pad = np.zeros((features.shape[0], self.input_dim - features.shape[-1]))
-                    features = np.hstack([features, pad])
+            # 🔥 RAIO-X: If L2 Sensory features are present in the last candle, append them
+            if tf_key == "M5" and "sensory_l2" in df_tf.columns:
+                last_l2 = df_tf["sensory_l2"].iloc[-1]
+                if isinstance(last_l2, list) and len(last_l2) == 42:
+                    l2_tensor = torch.tensor(last_l2, dtype=torch.float32)
+                    l2_seq = l2_tensor.unsqueeze(0).repeat(seq_len, 1)
                     
-                tensor = torch.tensor(
-                    features[-seq_len:], dtype=torch.float32
-                )
+                    if tensor.shape[-1] + l2_seq.shape[-1] == self.input_dim:
+                        tensor = torch.cat([tensor, l2_seq], dim=-1)
+                    else:
+                        logger.warning(f"L2 merge FAIL: base({tensor.shape[-1]}) + L2(42) != model({self.input_dim})")
 
             x_dict[tf_key] = tensor.unsqueeze(0).to(self.device)
 

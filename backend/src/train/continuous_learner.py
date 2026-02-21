@@ -51,10 +51,11 @@ class ContinuousLearner:
         SyncSessionLocal = sessionmaker(bind=sync_engine)
         self.db: Session = SyncSessionLocal()
         
-        # Defaults for architecture
-        self.worker_hidden = 64
-        self.coord_hidden = 256
+        # Defaults for architecture (Golden v10.0)
+        self.worker_hidden = 64 # Matches Golden active_model.pth
+        self.coord_hidden = 256 # Matches Golden active_model.pth
         self.seq_len = 128
+        self.input_dim = 12 # Standard for v9.7 checkpoints
         
         # Hyperparameters (Gladiator v9.7 Presets)
         self.epochs = 5
@@ -66,15 +67,25 @@ class ContinuousLearner:
         
         # 🚀 Phase 11: SwarmLoss with Dynamic Weighting
         self.criterion = SwarmLoss(alpha=0.75, gamma=2.0, consensus_weight=0.1).to(self.device)
-        self.scaler = torch.amp.GradScaler('cuda', enabled=(self.device.type == "cuda"))
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self._use_grad_scaler())
 
         # 🚀 Phase 13: Adversarial Components
-        self.challenger = ChallengerGenerator(input_dim=12, hidden_dim=64).to(self.device)
+        self.challenger = ChallengerGenerator(input_dim=self.input_dim, hidden_dim=64).to(self.device)
         self.challenger_opt = torch.optim.AdamW(self.challenger.parameters(), lr=1e-4)
         self.guard = OverfittingGuard(ema_alpha=0.1).to(self.device)
 
+    def _use_grad_scaler(self) -> bool:
+        """Detect if GradScaler should be enabled. Disabled on AMD ROCm."""
+        if self.device.type != "cuda":
+            return False
+        # ROCm/HIP reports torch.version.hip
+        if hasattr(torch.version, 'hip') and torch.version.hip is not None:
+            logger.info("🔧 AMD ROCm detected — GradScaler DISABLED (autocast still active)")
+            return False
+        return True
+
     def _load_model(self) -> SwarmBrain:
-        worker_cfg = WorkerConfig(input_dim=12, hidden_dim=self.worker_hidden)
+        worker_cfg = WorkerConfig(input_dim=self.input_dim, hidden_dim=self.worker_hidden)
         coord_cfg = CoordinatorConfig(num_workers=5, worker_dim=self.worker_hidden, hidden_dim=self.coord_hidden)
         
         model = SwarmBrain(worker_cfg, coord_cfg).to(self.device)
@@ -221,13 +232,17 @@ class ContinuousLearner:
                 batch_X = x_tensor[i : i + self.batch_size].to(self.device)
                 batch_y = y_tensor[i : i + self.batch_size].to(self.device)
                 
+                # 🛡️ Sync Dimensions: Slice to model's expected input_dim and seq_len
+                if batch_X.shape[-1] > self.input_dim:
+                    batch_X = batch_X[:, :, :self.input_dim]
+                if batch_X.shape[1] > self.seq_len:
+                    batch_X = batch_X[:, -self.seq_len:, :]
+                
                 self.optimizer.zero_grad()
                 
                 # 🚀 Swarm Implementation: Multi-TF Input
                 x_dict = self._simulate_timeframes(batch_X)
                 
-                with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
-                    logits, worker_logits, _, _ = self.model(x_dict)
                 with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
                     logits, worker_logits, _, _ = self.model(x_dict)
                     
@@ -327,6 +342,12 @@ class ContinuousLearner:
                     batch_X = X[i : i + self.batch_size].to(self.device)
                     batch_y = y[i : i + self.batch_size].long().to(self.device)
                     
+                    # 🛡️ Sync Dimensions: Slice to model's expected input_dim and seq_len
+                    if batch_X.shape[-1] > self.input_dim:
+                        batch_X = batch_X[:, :, :self.input_dim]
+                    if batch_X.shape[1] > self.seq_len:
+                        batch_X = batch_X[:, -self.seq_len:, :]
+                    
                     # 🚀 Phase 11: Feature Sanitization
                     batch_X = torch.nan_to_num(batch_X)
                     
@@ -339,10 +360,18 @@ class ContinuousLearner:
                         # Challenger attempts to 'prank' the features to confuse the Trader
                         self.challenger.eval() # Generator doesn't update its own weights during this pass
                         batch_X_orig = batch_X.clone()
+                        
+                        # LOG: Feed back the "Sadistic Professor" behavior to the UI
+                        if callback and epoch_batches % 50 == 0:
+                            callback(f"😈 Professor Sádico: Aplicando modo aleatório (Pressão: {current_pressure:.2f})")
+                            
                         with torch.no_grad():
-                            batch_X = self.challenger(batch_X, pressure=current_pressure)
+                            batch_X = self.challenger(batch_X, pressure=current_pressure, callback=callback if epoch_batches % 50 == 0 else None)
                     
                     self.optimizer.zero_grad()
+                    if is_adversarial:
+                        self.challenger_opt.zero_grad()
+
                     x_dict = self._simulate_timeframes(batch_X)
                     
                     with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
@@ -353,33 +382,36 @@ class ContinuousLearner:
                     if torch.isnan(loss):
                         continue
 
-                    # Trader Update: Minimize Loss
+                    # 1. Trader Backward
                     self.scaler.scale(loss).backward()
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-
-                    # Challenger Update: Maximize Trader's Error (Pegadinha)
-                    # Only update challenger on adversarial batches
+                    
+                    # 2. Challenger Backward (if needed)
                     if is_adversarial:
                         self.challenger.train()
-                        self.challenger_opt.zero_grad()
+                        for p in self.model.parameters(): p.requires_grad = False
                         
-                        # We want to MAXIMIZE trader loss by modifying Challenger weights
-                        # We re-run forward with gradients on the Challenger
                         batch_X_adv = self.challenger(batch_X_orig, pressure=current_pressure)
                         x_dict_adv = self._simulate_timeframes(batch_X_adv)
                         
                         with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
                             logits_adv, worker_logits_adv, _, _ = self.model(x_dict_adv)
                             loss_adv_dict = self.criterion(logits_adv, worker_logits_adv, batch_y)
-                            # Negative loss because we want to maximize it
                             challenger_loss = -loss_adv_dict["total"] 
                         
                         self.scaler.scale(challenger_loss).backward()
+                        for p in self.model.parameters(): p.requires_grad = True
+
+                    # 3. Step Optimizers
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
+                    self.scaler.step(self.optimizer)
+                    if is_adversarial:
+                        self.scaler.unscale_(self.challenger_opt)
                         self.scaler.step(self.challenger_opt)
-                        self.scaler.update()
+                        
+                    # 4. Final Scaler Update
+                    self.scaler.update()
                     
                     # 🚀 Phase 11: Multi-Class Metrics (Accuracy, Precision)
                     from sklearn.metrics import accuracy_score, precision_score
@@ -408,6 +440,10 @@ class ContinuousLearner:
                         callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | Swarm: {thought_str} | W: {sw_weights} | {progress}%")
                 
                 shard_count += 1
+                
+                # Cleanup VRAM between shards to prevent fragmentation
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
 
             # 🚀 Phase 13: Validation Pass & OverfittingGuard Update
             val_shard_dir = f"data/cache/{dataset_name}/val_shards"
@@ -421,6 +457,9 @@ class ContinuousLearner:
                     for v_shard in val_shards[:2]: # Sample 2 shards for speed
                         v_data = torch.load(os.path.join(val_shard_dir, v_shard), map_location='cpu')
                         v_X, v_y = v_data['X'].to(self.device), v_data['y'].to(self.device).long()
+                        
+                        if v_X.shape[-1] > 12:
+                            v_X = v_X[:, :, :12]
                         
                         v_x_dict = self._simulate_timeframes(v_X)
                         v_logits, v_worker_logits, _, _ = self.model(v_x_dict)

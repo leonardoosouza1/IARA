@@ -27,6 +27,8 @@ from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDa
 from alpaca.data.requests import CryptoBarsRequest, CryptoLatestTradeRequest, StockBarsRequest, StockLatestTradeRequest
 from alpaca.data.timeframe import TimeFrame
 
+from src.api.sensory_hub import AlpacaSensoryHub
+
 logger = logging.getLogger("MarketDataService")
 
 # Minimum interval (seconds) between engine state emissions
@@ -50,6 +52,9 @@ class MarketDataService:
         
         self.api_key = os.getenv("ALPACA_API_KEY")
         self.secret_key = os.getenv("ALPACA_SECRET_KEY")
+        
+        # Sensory Hub (RAIO-X)
+        self.sensory_hub: Optional[AlpacaSensoryHub] = None
 
     async def _init_exchanges(self):
         """Initialize Alpaca Data Clients."""
@@ -59,10 +64,12 @@ class MarketDataService:
 
         try:
             self.crypto_client = CryptoHistoricalDataClient(self.api_key, self.secret_key)
-            logger.info("✅ Connected to Alpaca Data API (Crypto)")
+            self.sensory_hub = AlpacaSensoryHub(self.api_key, self.secret_key)
+            logger.info("✅ Connected to Alpaca Data API (Crypto & Sensory Hub)")
         except Exception as e:
             logger.error(f"Failed to initialize Alpaca Data: {e}")
             self.crypto_client = None
+            self.sensory_hub = None
 
     async def _close_exchanges(self):
         """Close clients (No-op for REST clients, but kept for interface compatibility)."""
@@ -216,9 +223,12 @@ class MarketDataService:
         await self._init_exchanges()
         
         # Initial Data Load & Emit
-        logger.info("Initializing market data history...")
+        logger.info("Initializing market data history & sensory hub...")
         for symbol in self.symbols:
             await self._fetch_and_emit_history(symbol)
+            
+        if self.sensory_hub:
+            await self.sensory_hub.start(self.symbols)
         
         logger.info("🚀 Market Data Service Started (Alpaca Source)")
         
@@ -312,12 +322,30 @@ class MarketDataService:
         engine = fleet_manager.engines.get(agent_id)
         if engine and engine.active:
             try:
+                # Enrich candle with Sensory Data (L2)
+                if self.sensory_hub:
+                    sensory_vector = self.sensory_hub.get_sensory_vector(symbol)
+                    if sensory_vector is not None:
+                        candle["sensory_l2"] = sensory_vector.tolist()
+                
                 await engine.forward_tick(candle)
             except Exception as e:
                 logger.error(f"Engine push failed for {agent_id}: {e}")
 
     async def _emit_engine_state(self, symbol: str):
         """Check engine state and emit thoughts/updates to the frontend."""
+        if self.sensory_hub:
+            l2_data = self.sensory_hub.l2_cache.get(symbol)
+            if l2_data:
+                vbi = l2_data["vbi"]
+                cancel = l2_data["cancel_rate"]
+                await SocketEmitter.emit_brain_thought(
+                    agent_id=f"agent-{symbol.lower().replace('/', '-')}",
+                    step="raio-x",
+                    text=f"Vision: Imbalance {vbi:+.2f} | Cancel {cancel:.1%}",
+                    level="warning" if abs(vbi) > 0.7 or cancel > 0.3 else "info"
+                )
+
         agent_id = f"agent-{symbol.lower().replace('/', '-')}"
         engine = fleet_manager.engines.get(agent_id)
         if not engine:

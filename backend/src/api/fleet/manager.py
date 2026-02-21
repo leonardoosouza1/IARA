@@ -97,6 +97,16 @@ class FleetManager:
             if engine.active:
                 engine.stop()
 
+    def manual_override(self, agent_id: str, action: str):
+        """Force a manual buy/sell action on a specific agent."""
+        if agent_id in self.engines:
+            self.logger.info(f"Executing manual override {action.upper()} on {agent_id}")
+            # The engine itself should handle the execution. For now, we just log it.
+            # In a full implementation, you'd route this to the agent's executor
+            self.engines[agent_id].executor.execute_signal(action.upper())
+        else:
+            self.logger.warning(f"Agent {agent_id} not found for manual override")
+
     def get_status(self) -> List[dict]:
         """Collect status from all agents."""
         status_list = []

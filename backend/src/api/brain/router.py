@@ -237,6 +237,7 @@ async def delete_dataset(symbol: str):
 
 @router.get("/models")
 async def list_models():
+    import torch
     model_dir = "logs/models"
     if not os.path.exists(model_dir): return []
     models = []
@@ -244,12 +245,33 @@ async def list_models():
         if file.endswith(".pth"):
             full_path = os.path.join(model_dir, file)
             stats = os.stat(full_path)
+            
+            # Introspect checkpoint for dimensions
+            meta = {"input_dim": "?", "worker_hidden": "?", "coord_hidden": "?", "num_params": "?"}
+            try:
+                state = torch.load(full_path, map_location="cpu", weights_only=False)
+                # input_dim from first worker input_proj
+                w = state.get("swarm.workers.M5.input_proj.weight")
+                if w is not None and hasattr(w, 'shape'):
+                    meta["input_dim"] = int(w.shape[1])
+                    meta["worker_hidden"] = int(w.shape[0])
+                # coord_hidden from policy_head
+                ph = state.get("coordinator.policy_head.weight")
+                if ph is not None and hasattr(ph, 'shape'):
+                    meta["coord_hidden"] = int(ph.shape[1])
+                # Count params
+                meta["num_params"] = sum(v.numel() for v in state.values() if hasattr(v, 'numel'))
+            except Exception:
+                pass
+            
             models.append({
                 "name": file,
                 "size": f"{stats.st_size / (1024*1024):.2f} MB",
-                "last_modified": datetime.fromtimestamp(stats.st_mtime).isoformat()
+                "last_modified": datetime.fromtimestamp(stats.st_mtime).isoformat(),
+                **meta
             })
     return models
+
 
 @router.delete("/models/{model_name}")
 async def delete_model(model_name: str):

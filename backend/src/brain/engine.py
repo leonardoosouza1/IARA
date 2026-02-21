@@ -59,12 +59,11 @@ class EngineConfig:
     
     # Model
     checkpoint_path: str = "logs/models/best_model_v9_BTCUSD.pth"
-    worker_hidden: int = 128         # v9.7 "Gladiator" dims
-    coord_hidden: int = 512
+    worker_hidden: int = 0   # 0 = auto-detect from checkpoint
+    coord_hidden: int = 0    # 0 = auto-detect from checkpoint
     seq_len: int = 128
     device: str = "cpu"
 
-    device: str = "cpu"
 
 class DataBuffer:
     """Manages streaming market data and converts to SwarmBrain-ready DataFrames."""
@@ -154,10 +153,35 @@ class TrinityEngine:
         if config is None:
             config = EngineConfig()
 
+        # Auto-detect dimensions from checkpoint if not explicitly set
+        worker_hidden = config.worker_hidden
+        coord_hidden = config.coord_hidden
+        
+        if (worker_hidden == 0 or coord_hidden == 0) and os.path.exists(config.checkpoint_path):
+            try:
+                state = torch.load(config.checkpoint_path, map_location="cpu", weights_only=False)
+                # Detect worker_hidden from input_proj weight shape
+                w = state.get("swarm.workers.M5.input_proj.weight")
+                if w is not None and hasattr(w, 'shape') and len(w.shape) == 2:
+                    worker_hidden = int(w.shape[0])  # hidden_dim
+                    logger.info(f"  Auto-detected worker_hidden={worker_hidden} from checkpoint")
+                    
+                # Detect coord_hidden from policy_head weight shape
+                ph = state.get("coordinator.policy_head.weight")
+                if ph is not None and hasattr(ph, 'shape') and len(ph.shape) == 2:
+                    coord_hidden = int(ph.shape[1])  # hidden_dim
+                    logger.info(f"  Auto-detected coord_hidden={coord_hidden} from checkpoint")
+            except Exception as e:
+                logger.warning(f"  Could not auto-detect dims: {e}. Using defaults.")
+        
+        # Fallback to safe defaults if still 0
+        if worker_hidden == 0: worker_hidden = 64
+        if coord_hidden == 0: coord_hidden = 256
+
         signal_engine = SignalEngine(
             checkpoint_path=config.checkpoint_path,
-            worker_hidden=config.worker_hidden,
-            coord_hidden=config.coord_hidden,
+            worker_hidden=worker_hidden,
+            coord_hidden=coord_hidden,
             seq_len=config.seq_len,
             device=config.device,
         )
