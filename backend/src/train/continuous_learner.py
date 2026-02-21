@@ -9,6 +9,8 @@ import torch.nn as nn
 from sqlalchemy import create_engine, desc
 from sqlalchemy.orm import Session, sessionmaker
 import pandas as pd
+import numpy as np
+import warnings
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -79,6 +81,11 @@ class ContinuousLearner:
         self.challenger = ChallengerGenerator(input_dim=self.input_dim, hidden_dim=64).to(self.device)
         self.challenger_opt = torch.optim.AdamW(self.challenger.parameters(), lr=1e-4)
         self.guard = OverfittingGuard(ema_alpha=0.1).to(self.device)
+
+        # 🚀 Plateau Breaker Variables (Phase 19)
+        self.best_val_loss = float('inf')
+        self.epochs_without_improvement = 0
+        self.patience_threshold = 7
 
     def _use_grad_scaler(self) -> bool:
         """Detect if GradScaler should be enabled. Disabled on AMD ROCm."""
@@ -395,9 +402,49 @@ class ContinuousLearner:
                 
                 self.scaler.update()
                 
+                # 🚀 Phase 11 & 14: Multi-Class Metrics (Accuracy, Precision, AUC, F1)
+                from sklearn.metrics import accuracy_score, precision_score, f1_score, roc_auc_score
+                with torch.no_grad():
+                    logits_np = logits.detach().cpu().numpy()
+                    preds = logits_np.argmax(axis=-1)
+                    true_y = batch_y.cpu().numpy()
+                    
+                    acc = accuracy_score(true_y, preds)
+                    prec = precision_score(true_y, preds, average='macro', zero_division=0)
+                    f1 = f1_score(true_y, preds, average='macro', zero_division=0)
+                    
+                    # AUC requires probabilities
+                    probs = torch.softmax(logits.detach(), dim=-1).cpu().numpy()
+                    
+                    import numpy as np
+                    import warnings
+                    try:
+                        # 🚀 Phase 18: Class Diversity Safeguard
+                        unique_classes = np.unique(true_y)
+                        if len(unique_classes) > 1:
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore")
+                                # OVR (One-vs-Rest) AUC for multi-class with explicit labels to avoid failure on missing classes
+                                auc = roc_auc_score(true_y, probs, multi_class='ovr', average='macro', labels=[0, 1, 2])
+                        else:
+                            auc = 0.5 # Default for single-class batches
+                    except Exception:
+                        auc = 0.5
+                
                 epoch_loss += loss.item()
                 batch_count += 1
                 current_step += 1
+                
+                # Report every 10 batches for high-fidelity UI tracking
+                if callback and batch_count % 10 == 0:
+                    progress = int((current_step / total_steps) * 100)
+                    sw_weights = [f"{w:.2f}" for w in loss_dict["weights"]]
+                    # Expert "Thoughts" Insight
+                    exp_votes = worker_logits.argmax(dim=-1).cpu().numpy()[0]
+                    v_map = {0: "L", 1: "S", 2: "W"}
+                    thought_str = "-".join([v_map[v] for v in exp_votes])
+                    
+                    callback(f"Epoch {epoch+1} | B {batch_count} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | Pressure: {is_adversarial * current_pressure:.2f} | {progress}%")
             
             if batch_count > 0:
                 avg_loss = epoch_loss / batch_count
@@ -408,11 +455,17 @@ class ContinuousLearner:
                 if avg_loss < best_loss:
                     best_loss = avg_loss
                     best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-                    if callback: callback(f"🏆 New best model! Loss: {best_loss:.4f} (Epoch {epoch+1})")
+                    if callback: callback(f"🏆 Epoch {epoch+1} | New best model (Journal)! Loss: {best_loss:.4f}")
+                    # Phase 14: Immediate Auto-Save
+                    save_path = self.checkpoint_path or "logs/models/active_model.pth"
+                    torch.save({'model_state_dict': self.model.state_dict()}, save_path)
+                    if callback: callback(f"💾 Epoch {epoch+1} | Auto-saved best model to {os.path.basename(save_path)}")
                 
             # Phase 14: Execute Trauma Replay
             if len(self.trauma_buffer_X) > 0:
-                self._train_trauma_replay(callback)
+                if callback: callback(f"🧠 Epoch {epoch+1} | Initiating Trauma Replay... Retraining on {len(self.trauma_buffer_X)} severe mistakes.")
+                self._train_trauma_replay(lambda m: callback(f"Epoch {epoch+1} | {m}"))
+                if callback: callback(f"✅ Epoch {epoch+1} | Trauma Replay completed.")
 
         # Restore and save the best model weights
         if best_state:
@@ -444,6 +497,21 @@ class ContinuousLearner:
         best_state = None
         stopped = False
         
+        # --- GLOBAL PROGRESS PRE-CALCULATION ---
+        # Sum total batches once to avoid redundant I/O per epoch
+        total_epoch_batches = 0
+        for s_file in shards:
+            try:
+                # Only load enough to get the size
+                s_meta = torch.load(os.path.join(shard_dir, s_file), map_location='cpu', weights_only=True)
+                s_X = s_meta.get('X')
+                if s_X is not None:
+                    total_epoch_batches += (len(s_X) + self.batch_size - 1) // self.batch_size
+            except Exception:
+                continue
+        
+        if total_epoch_batches == 0: total_epoch_batches = 1
+        
         for epoch in range(self.epochs):
             if stopped:
                 break
@@ -453,29 +521,38 @@ class ContinuousLearner:
             for shard_file in shards:
                 if stopped:
                     break
+                
                 shard_path = os.path.join(shard_dir, shard_file)
+                
+                # Check shard size for transparency
+                try:
+                    s_data = torch.load(shard_path, map_location='cpu', weights_only=True)
+                    s_X = s_data.get('X')
+                    shard_batches = (len(s_X) + self.batch_size - 1) // self.batch_size if s_X is not None else 0
+                    if callback: callback(f"📂 Loading Shard {shard_count+1}/{len(shards)}: {shard_file} ({shard_batches} batches)...")
+                except Exception:
+                    if callback: callback(f"📂 Loading Shard {shard_count+1}/{len(shards)}: {shard_file}...")
+                
                 # 🔥 CRITICAL FIX: Keep large dataset on CPU to prevent OOM
                 data = torch.load(shard_path, map_location='cpu')
                 X = data['X']
                 y = data['y']
                 
                 
-                # 🚀 Dynamic Tensor Padding for Older Datasets
-                # Old shards (v9) have 26 cols, or were truncated to 12. New shards (v10) have 28 cols.
-                is_old_shard = (X.shape[-1] in [12, 22, 26])
+                # 🚀 Robust Dimension Migration (v9 -> v11)
+                # target_dim is self.input_dim (usually 26 or 28)
+                shard_dim = X.shape[-1]
                 
-                if is_old_shard:
-                    core_X = X[:, :, :12]
-                    if self.input_dim > 12:
-                        padding = torch.zeros(X.shape[0], X.shape[1], self.input_dim - 12, dtype=X.dtype, device=X.device)
-                        X = torch.cat([core_X, padding], dim=-1)
-                    else:
-                        X = core_X
+                # If it's the very old legacy (12 features), we pad manually
+                if shard_dim == 12 and self.input_dim > 12:
+                    padding = torch.zeros(X.shape[0], X.shape[1], self.input_dim - 12, dtype=X.dtype, device=X.device)
+                    X = torch.cat([X, padding], dim=-1)
                 else:
-                    if X.shape[-1] > self.input_dim:
+                    # Otherwise, we either slice to fit or pad to fit based on self.input_dim
+                    if shard_dim > self.input_dim:
                         X = X[:, :, :self.input_dim]
-                    elif X.shape[-1] < self.input_dim:
-                        padding = torch.zeros(X.shape[0], X.shape[1], self.input_dim - X.shape[-1], dtype=X.dtype, device=X.device)
+                    elif shard_dim < self.input_dim:
+                        padding = torch.zeros(X.shape[0], X.shape[1], self.input_dim - shard_dim, dtype=X.dtype, device=X.device)
                         X = torch.cat([X, padding], dim=-1)
                 
                 num_batches_in_shard = max(1, (len(X) + self.batch_size - 1) // self.batch_size)
@@ -499,8 +576,10 @@ class ContinuousLearner:
                     # 🚀 Phase 11: Feature Sanitization
                     batch_X = torch.nan_to_num(batch_X)
                     
-                    # 🚀 Dojo Warmup: Curriculum Learning Schedule
-                    adv_prob = 0.0 if epoch == 0 else (0.1 if epoch == 1 else 0.3)
+                    # 🚀 Phase 13 & 16: Extreme Warmup Schedule
+                    # Ep 1-2: 0%, Ep 3-4: 5%, Ep 5-6: 10%, Ep 7-8: 15%, Ep 9+: 30%
+                    adv_schedule = [0.0, 0.0, 0.05, 0.05, 0.10, 0.10, 0.15, 0.15]
+                    adv_prob = adv_schedule[epoch] if epoch < len(adv_schedule) else 0.30
                     
                     # 🚀 Phase 13: Adversarial "Prank" Generation
                     is_adversarial = torch.rand(1).item() < adv_prob
@@ -515,8 +594,14 @@ class ContinuousLearner:
                         if callback and epoch_batches % 50 == 0:
                             callback(f"😈 Professor Sádico: Aplicando modo aleatório (Pressão: {current_pressure:.2f})")
                             
+                        # 🌋 Phase 19: Professor Breathe (Harmonic Oscillation)
+                        # Oscillates pressure between 80% and 120% of current_pressure to prevent static noise adaptive fixation
+                        import math
+                        breathe_factor = 1.0 + 0.2 * math.sin(epoch_batches * 0.1)
+                        dynamic_pressure = current_pressure * breathe_factor
+                        
                         with torch.no_grad():
-                            batch_X, _ = self.challenger(batch_X, pressure=current_pressure, callback=callback if epoch_batches % 50 == 0 else None)
+                            batch_X, _ = self.challenger(batch_X, pressure=dynamic_pressure, callback=callback if epoch_batches % 50 == 0 else None)
                      
                     self.optimizer.zero_grad()
                     if is_adversarial:
@@ -583,28 +668,38 @@ class ContinuousLearner:
                         
                         # AUC requires probabilities
                         probs = torch.softmax(logits.detach(), dim=-1).cpu().numpy()
-                        try:
-                            # OVR (One-vs-Rest) AUC for multi-class
-                            auc = roc_auc_score(true_y, probs, multi_class='ovr', average='macro')
-                        except Exception:
-                            auc = 0.5 # Default for early training / single class batches
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            try:
+                                if len(np.unique(true_y)) > 1:
+                                    # OVR (One-vs-Rest) AUC for multi-class with explicit labels to avoid failure on missing classes
+                                    auc = roc_auc_score(true_y, probs, multi_class='ovr', average='macro', labels=[0, 1, 2])
+                                else:
+                                    auc = 0.5
+                            except Exception:
+                                auc = 0.5 # Default for early training / single class batches
+                        
+                        # Phase 13: "Panic Protection"
+                        # If Professor Sádico is smashing accuracy too hard, we force a slight pressure decay
+                        if is_adversarial and acc < 0.40:
+                            self.guard.pressure = torch.tensor(max(0.1, self.guard.get_pressure() * 0.9), device=self.device)
+                            if callback: callback(f"🛡️ Epoch {epoch+1} | Panic Protection: Reducing Professor pressure to {self.guard.get_pressure():.2f}")
                     
                     epoch_loss += loss.item()
                     epoch_batches += 1
                     total_batches += 1
                     
-                    # Report every 25 batches for UI telemetry
-                    if callback and epoch_batches % 25 == 0:
-                        progress = int((epoch_batches / num_batches_in_shard) * 100)
+                    # Report every 5 batches for high-fidelity "Chart Dance"
+                    if callback and epoch_batches % 5 == 0:
+                        progress = int((epoch_batches / total_epoch_batches) * 100)
                         sw_weights = [f"{w:.2f}" for w in loss_dict["weights"]]
                         
                         # Expert "Thoughts" Insight
-                        # M5, M15, M30, H1, H4
-                        exp_votes = worker_logits.argmax(dim=-1).cpu().numpy()[0] # Take first batch sample
+                        exp_votes = worker_logits.argmax(dim=-1).cpu().numpy()[0] 
                         v_map = {0: "L", 1: "S", 2: "W"}
                         thought_str = "-".join([v_map[v] for v in exp_votes])
                         
-                        callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | {progress}%")
+                        callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | Pressure: {is_adversarial * current_pressure:.2f} | {progress}%")
                 
                 shard_count += 1
                 
@@ -652,9 +747,14 @@ class ContinuousLearner:
                     avg_val_loss = val_loss / val_batches
                     if epoch_batches > 0:
                         avg_train_loss = epoch_loss / epoch_batches 
-                        self.guard.update(avg_train_loss, avg_val_loss)
+                        # Phase 13: Delay OverfittingGuard until masters basic data (Epoch 5+)
+                        if epoch >= 4:
+                            self.guard.update(avg_train_loss, avg_val_loss)
+                        else:
+                            if callback: callback(f"🧸 Epoch {epoch+1} | Professor Gentil: Pressão travada para masters inicial...")
                     
-                    if callback: callback(f"📉 Validation Loss vs Professor Sádico: {avg_val_loss:.4f}")
+                    val_label = "Limpo (Base)" if epoch < 2 else "vs Professor Sádico"
+                    if callback: callback(f"📉 Epoch {epoch+1} | Validation Loss ({val_label}): {avg_val_loss:.4f}")
                         
                     # Phase 14: ReduceLROnPlateau
                     self.scheduler.step(avg_val_loss)
@@ -663,9 +763,29 @@ class ContinuousLearner:
                     if callback and epoch > 0:
                         callback(f"🔧 Learning Rate: {current_lr:.6f} | Challenger Pressure: {self.guard.get_pressure():.2f}")
 
+                    # 🌋 Phase 19: Plateau Breaker (Warm Restart & Professor Retreat)
+                    if avg_val_loss < self.best_val_loss:
+                        self.best_val_loss = avg_val_loss
+                        self.epochs_without_improvement = 0
+                    else:
+                        self.epochs_without_improvement += 1
+                        
+                    if self.epochs_without_improvement >= self.patience_threshold:
+                        if callback: callback(f"🌋 Plateau Detected! Breaking stagnancy with Warm Restart & Professor Retreat.")
+                        # 1. Warm Restart: Reset LR to 75% of initial
+                        for param_group in self.optimizer.param_groups:
+                            param_group['lr'] = self.learning_rate * 0.75
+                        
+                        # 2. Professor Retreat: Temporary Pressure Nerf (Reduce by 50%)
+                        self.guard.pressure = torch.tensor(max(0.1, self.guard.get_pressure() * 0.5), device=self.device)
+                        
+                        self.epochs_without_improvement = 0 # Reset tracker
+
             # Phase 14: Execute Trauma Replay at the end of every epoch if accumulated
             if len(self.trauma_buffer_X) > 0:
-                self._train_trauma_replay(callback)
+                if callback: callback(f"🧠 Epoch {epoch+1} | Initiating Trauma Replay... Retraining on {len(self.trauma_buffer_X)} severe mistakes.")
+                self._train_trauma_replay(lambda m: callback(f"Epoch {epoch+1} | {m}"))
+                if callback: callback(f"✅ Epoch {epoch+1} | Trauma Replay completed.")
             
             if epoch_batches > 0:
                 avg_epoch_loss = epoch_loss / epoch_batches
@@ -675,7 +795,11 @@ class ContinuousLearner:
                 if avg_epoch_loss < best_loss:
                     best_loss = avg_epoch_loss
                     best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-                    if callback: callback(f"🏆 New best model (Dataset)! Loss: {best_loss:.4f} (Epoch {epoch+1})")
+                    if callback: callback(f"🏆 Epoch {epoch+1} | New best model (Dataset)! Loss: {best_loss:.4f}")
+                    # Phase 14: Immediate Auto-Save
+                    save_path = self.checkpoint_path or "logs/models/active_model.pth"
+                    torch.save({'model_state_dict': self.model.state_dict()}, save_path)
+                    if callback: callback(f"💾 Epoch {epoch+1} | Auto-saved best model to {os.path.basename(save_path)}")
 
         # Restore and save the best model weights
         if best_state:

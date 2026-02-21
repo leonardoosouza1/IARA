@@ -40,6 +40,7 @@ training_state = {
     "logs": [],     # Recent training logs
     "all_logs": [], # Full history for export
     "stop_requested": False,
+    "current_epoch": 1,
 }
 
 # In-memory data fetching status
@@ -88,6 +89,10 @@ def run_training_background(protocol: Dict[str, Any]):
             
             # Parse progress % and loss from callback messages
             import re
+            epoch_match = re.search(r'Epoch\s*(\d+)', msg)
+            if epoch_match:
+                training_state["current_epoch"] = int(epoch_match.group(1))
+            
             progress_match = re.search(r'(\d+)%', msg)
             if progress_match:
                 training_state["progress"] = int(progress_match.group(1))
@@ -121,8 +126,13 @@ def run_training_background(protocol: Dict[str, Any]):
 
             # Store in history if it's a metric update
             if loss_match:
+                epoch_val = int(epoch_match.group(1)) if epoch_match else training_state["current_epoch"]
+                progress_val = int(progress_match.group(1)) if progress_match else 0
+                
                 training_state["history"].append({
                     "time": datetime.now().strftime('%H:%M:%S'),
+                    "epoch": epoch_val,
+                    "progress": progress_val,
                     "loss": training_state["last_loss"],
                     "acc": training_state["last_acc"] or 0,
                     "prec": training_state["last_prec"] or 0,

@@ -52,7 +52,7 @@ class ChallengerGenerator(nn.Module):
             nn.Tanh()
         )
         
-        self.pressure_scaler = nn.Parameter(torch.tensor(0.01)) 
+        self.pressure_scaler = nn.Parameter(torch.tensor(0.005)) 
         
     def _select_attack_mode(self) -> int:
         """UCB (Upper Confidence Bound) Arm Selection"""
@@ -159,7 +159,7 @@ class ChallengerGenerator(nn.Module):
         batch_size, seq_len, dim = x.size()
         if dim > 6:
             atr_tensor = torch.abs(x[:, :, 6]) 
-            max_perturbation = atr_tensor * 0.5 * pressure
+            max_perturbation = atr_tensor * 0.2 * pressure
         else:
             max_perturbation = torch.full((batch_size, seq_len), 0.1 * pressure, device=x.device)
             
@@ -167,16 +167,16 @@ class ChallengerGenerator(nn.Module):
         max_perturbation = torch.clamp(max_perturbation, min=0.01)
         
         if mode == 0:
-            if callback: callback("😈 Professor Sádico: Simulando Stop Hunt (Wick/Violinada)...")
+            if callback: callback(f"😈 Professor Sádico: Simulando Stop Hunt (Wick/Violinada) | Intensidade: {pressure:.2f}...")
             return self._apply_stop_hunt(x, max_perturbation), mode
         elif mode == 1:
-            if callback: callback("😈 Professor Sádico: Simulando Liquidation Cascade (Efeito Dominó)...")
+            if callback: callback(f"😈 Professor Sádico: Simulando Liquidation Cascade (Efeito Dominó) | Intensidade: {pressure:.2f}...")
             return self._apply_liquidation_cascade(x, max_perturbation), mode
         elif mode == 2:
-            if callback: callback("😈 Professor Sádico: Injetando Ruído Lateral (Choppy Market)...")
+            if callback: callback(f"😈 Professor Sádico: Injetando Ruído Lateral (Choppy Market) | Intensidade: {pressure:.2f}...")
             return self._apply_choppy_market(x, max_perturbation), mode
         else:
-            if callback: callback("😈 Professor Sádico: Aplicando Neural Prank (Adversarial Noise)...")
+            if callback: callback(f"😈 Professor Sádico: Aplicando Neural Prank (Adversarial Noise) | Intensidade: {pressure:.2f}...")
             # Traditional Neural Prank
             x_flat = x.view(-1, self.input_dim)
             features = self.encoder(x_flat)

@@ -33,6 +33,7 @@ import {
   ResponsiveContainer,
   AreaChart,
   Area,
+  Brush,
 } from "recharts";
 
 interface TrainingStatus {
@@ -82,9 +83,12 @@ interface TradeRecord {
 
 interface MetricPoint {
   time: string;
+  epoch: number;
+  progress: number;
   loss: number;
   acc: number;
   prec: number;
+  auc: number;
   pressure: number;
 }
 
@@ -145,6 +149,49 @@ const LOG_ANIMATIONS = [
   "animate-[popIn_0.5s_ease-out]",
   "animate-[slideDrift_0.5s_ease-out]",
 ];
+
+function ChartTooltip({ active, payload, label }: any) {
+  if (active && payload && payload.length) {
+    const data = payload[0].payload;
+    return (
+      <div className="bg-zinc-950 border border-zinc-800 p-3 rounded-lg shadow-2xl backdrop-blur-md">
+        <div className="flex justify-between items-center gap-8 mb-2 border-b border-zinc-900 pb-2">
+          <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">
+            Epoch {data.epoch}
+          </span>
+          <span className="text-[10px] font-bold text-zinc-500">
+            {data.progress}% Complete
+          </span>
+        </div>
+        <div className="space-y-1.5 min-w-[140px]">
+          {payload.map((entry: any, index: number) => (
+            <div
+              key={index}
+              className="flex justify-between items-center gap-4"
+            >
+              <span className="text-[10px] text-zinc-400 flex items-center gap-1.5">
+                <div
+                  className="w-1.5 h-1.5 rounded-full"
+                  style={{ backgroundColor: entry.color }}
+                />
+                {entry.name}
+              </span>
+              <span className="text-[10px] font-mono font-bold text-zinc-200">
+                {entry.name === "Loss"
+                  ? entry.value.toFixed(4)
+                  : `${(entry.value * 100).toFixed(1)}%`}
+              </span>
+            </div>
+          ))}
+          <div className="pt-2 text-[8px] text-zinc-600 font-mono text-center">
+            {data.time}
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return null;
+}
 
 function AnimatedLog({ log, isLatest }: { log: string; isLatest: boolean }) {
   const [animClass] = useState(() => {
@@ -801,18 +848,24 @@ export default function BrainLabPage() {
                   />
                   <XAxis
                     dataKey="time"
-                    stroke="#52525b"
+                    stroke="#3f3f46"
                     fontSize={9}
                     tickMargin={10}
-                    minTickGap={20}
+                    minTickGap={30}
+                    tickFormatter={(value, index) => {
+                      const item = metricHistory[index];
+                      // Show epoch start markers
+                      if (item && item.progress < 5) return `EP${item.epoch}`;
+                      return "";
+                    }}
                   />
                   <YAxis
                     yAxisId="left"
-                    domain={[0, (dataMax) => Math.max(dataMax * 3, 2)]}
+                    domain={[0, "auto"]}
                     stroke="#6366f1"
                     fontSize={9}
-                    tickFormatter={(value) => value.toFixed(2)}
-                    width={40}
+                    tickFormatter={(value) => value.toFixed(1)}
+                    width={35}
                   />
                   <YAxis
                     yAxisId="right"
@@ -821,18 +874,9 @@ export default function BrainLabPage() {
                     stroke="#10b981"
                     fontSize={9}
                     tickFormatter={(value) => `${(value * 100).toFixed(0)}%`}
-                    width={40}
+                    width={35}
                   />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "#09090b",
-                      border: "1px solid #27272a",
-                      borderRadius: "8px",
-                      fontSize: "10px",
-                    }}
-                    itemStyle={{ padding: "0px" }}
-                    labelStyle={{ color: "#a1a1aa", marginBottom: "4px" }}
-                  />
+                  <Tooltip content={<ChartTooltip />} />
                   <Area
                     yAxisId="left"
                     type="monotone"
@@ -842,6 +886,7 @@ export default function BrainLabPage() {
                     fillOpacity={1}
                     fill="url(#colorLoss)"
                     name="Loss"
+                    isAnimationActive={false}
                   />
                   <Area
                     yAxisId="right"
@@ -849,9 +894,30 @@ export default function BrainLabPage() {
                     dataKey="acc"
                     stroke="#10b981"
                     strokeWidth={2}
-                    fillOpacity={1}
-                    fill="url(#colorAcc)"
+                    fillOpacity={0.05}
+                    fill="#10b981"
                     name="Accuracy"
+                    isAnimationActive={false}
+                  />
+                  <Area
+                    yAxisId="right"
+                    type="monotone"
+                    dataKey="auc"
+                    stroke="#f59e0b"
+                    strokeWidth={2}
+                    fillOpacity={0}
+                    name="AUC"
+                    isAnimationActive={false}
+                  />
+                  <Area
+                    yAxisId="right"
+                    type="monotone"
+                    dataKey="prec"
+                    stroke="#8b5cf6"
+                    strokeWidth={1}
+                    fillOpacity={0}
+                    name="Precision"
+                    isAnimationActive={false}
                   />
                   <Area
                     yAxisId="right"
@@ -862,6 +928,14 @@ export default function BrainLabPage() {
                     strokeDasharray="3 3"
                     fillOpacity={0}
                     name="Challenger"
+                    isAnimationActive={false}
+                  />
+                  <Brush
+                    dataKey="time"
+                    height={20}
+                    stroke="#27272a"
+                    fill="#09090b"
+                    travellerWidth={10}
                   />
                 </AreaChart>
               </ResponsiveContainer>

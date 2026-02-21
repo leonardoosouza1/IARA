@@ -260,7 +260,8 @@ class SwarmLoss(nn.Module):
         alpha: float = 0.75,
         gamma: float = 2.0,
         consensus_weight: float = 0.1,
-        label_smoothing: float = 0.1
+        label_smoothing: float = 0.1,
+        diversity_weight: float = 0.1 # 🌋 NEW: Penalty to avoid weight collapse
     ):
         super().__init__()
         
@@ -277,6 +278,7 @@ class SwarmLoss(nn.Module):
             label_smoothing=label_smoothing
         )
         self.consensus_loss = ConsensusLoss()
+        self.diversity_weight = diversity_weight
         
     def forward(
         self,
@@ -310,15 +312,21 @@ class SwarmLoss(nn.Module):
         # Total Weighted Loss
         total_l = (
             coord_weight * l_coord + 
-            weights[1] * l_workers * 0.4 + # Worker signal is noisy, keep it low
             weights[2] * l_consensus * 0.1 # Weight consensus but don't let it dominate
         )
+        
+        # 4. Weight Entropy Penalty (🌋 Phase 19)
+        # Prevents weights from becoming "one-hot" (winner-take-all collapse)
+        # Entropy is sum(-p * log(p)). To maximize it, we minimize -entropy.
+        weight_entropy = - (weights * torch.log(weights + 1e-8)).sum()
+        total_l = total_l - (self.diversity_weight * weight_entropy)
         
         return {
             "total": total_l,
             "coord": l_coord,
             "workers": l_workers,
             "consensus": l_consensus,
+            "entropy": weight_entropy,
             "weights": [coord_weight.item(), weights[1].item(), weights[2].item()]
         }
 
