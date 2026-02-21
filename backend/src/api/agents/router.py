@@ -23,7 +23,7 @@ class AgentCreate(BaseModel):
     id: str
     symbol: str
     market_type: str
-    model_version: str = "SwarmBrain v9.7"
+    model_version: str = "active_model.pth"
     
 class AgentResponse(BaseModel):
     id: str
@@ -37,17 +37,6 @@ async def list_agents(db: AsyncSession = Depends(get_db)):
     """List all agent profiles."""
     result = await db.execute(select(AgentProfile))
     agents = result.scalars().all()
-    # If empty, initialize defaults
-    if not agents:
-        defaults = [
-            AgentProfile(id="agent-btc-usd", symbol="BTC/USD", market_type="crypto"),
-            AgentProfile(id="agent-eur-usd", symbol="EUR/USD", market_type="forex"),
-        ]
-        db.add_all(defaults)
-        await db.commit()
-        for d in defaults:
-            await db.refresh(d)
-        agents = defaults
     return agents
 
 @router.post("", response_model=AgentResponse)
@@ -93,6 +82,13 @@ async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
         
     await db.delete(agent)
     await db.commit()
+    
+    try:
+        from src.api.fleet.manager import fleet_manager
+        fleet_manager.stop_agent(agent_id)
+    except Exception as e:
+        logger.error(f"Failed to stop agent {agent_id} during deletion: {e}")
+
     return {"message": "Agent deleted successfully"}
 
 @router.put("/{agent_id}/toggle")

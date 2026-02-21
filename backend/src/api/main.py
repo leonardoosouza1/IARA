@@ -21,6 +21,7 @@ from src.api.events import sio
 from src.api.auth.router import router as auth_router
 from src.api.fleet.router import router as fleet_router
 from src.api.agents.router import router as agents_router
+from src.api.brain.router import router as brain_router
 from src.api.market_data import market_service
 
 # ── Logging ───────────────────────────────────────────────────
@@ -82,6 +83,7 @@ api.add_middleware(
 api.include_router(auth_router, prefix="/api/v1")
 api.include_router(fleet_router, prefix="/api/v1")
 api.include_router(agents_router, prefix="/api/v1")
+api.include_router(brain_router, prefix="/api/v1")
 
 
 @api.get("/api/v1/health")

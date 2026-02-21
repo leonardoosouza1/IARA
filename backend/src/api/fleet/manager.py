@@ -81,6 +81,12 @@ class FleetManager:
         if agent_id in self.engines:
             self.logger.info(f"Stopping agent {agent_id}...")
             self.engines[agent_id].stop()
+            # Remove from memory so it can be cleanly recreated/reloaded
+            del self.engines[agent_id]
+            if agent_id in self.configs:
+                del self.configs[agent_id]
+            if agent_id in self._market_types:
+                del self._market_types[agent_id]
         else:
             self.logger.warning(f"Agent {agent_id} not found")
 

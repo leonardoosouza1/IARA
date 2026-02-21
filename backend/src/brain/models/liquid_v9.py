@@ -27,8 +27,8 @@ from src.brain.models.workers import WorkerSwarm, WorkerConfig, CfCCell
 class CoordinatorConfig:
     """Configuration for SwarmCoordinator."""
     num_workers: int = 5
-    worker_dim: int = 32
-    hidden_dim: int = 128
+    worker_dim: int = 64
+    hidden_dim: int = 256
     num_heads: int = 4
     dropout: float = 0.3
     num_cfc_layers: int = 1
@@ -37,9 +37,6 @@ class CoordinatorConfig:
 class CrossAttentionFusion(nn.Module):
     """
     Cross-attention layer where workers "vote" on consensus.
-    
-    Each worker embedding attends to all other workers
-    to determine relative importance.
     """
     
     def __init__(self, embed_dim: int, num_heads: int = 4, dropout: float = 0.1):
@@ -55,54 +52,33 @@ class CrossAttentionFusion(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Worker embeddings [batch, num_workers, embed_dim]
-            
-        Returns:
-            Context-aware embeddings [batch, num_workers, embed_dim]
-        """
-        # Self-attention among workers
         attn_out, _ = self.attention(x, x, x, need_weights=False)
-        
-        # Residual + Norm
         x = self.norm(x + self.dropout(attn_out))
-        
         return x
 
 
 class ConsensusFusion(nn.Module):
     """
     Fuses worker embeddings + logits into a single context vector.
-    
-    Combines:
-    1. Attended embeddings (what each worker "thinks")
-    2. Worker confidence (how sure each worker is)
     """
     
     def __init__(
         self, 
         num_workers: int, 
         worker_dim: int, 
-        num_classes: int = 2,
-        hidden_dim: int = 128
+        num_classes: int = 3,
+        hidden_dim: int = 256
     ):
         super().__init__()
         
         self.num_workers = num_workers
-        
-        # Cross-attention for worker consensus
         self.cross_attn = CrossAttentionFusion(
             embed_dim=worker_dim,
             num_heads=4,
             dropout=0.1
         )
         
-        # Confidence weighting (learn to trust/distrust workers)
         self.confidence_proj = nn.Linear(num_classes, 1)
-        
-        # Fusion MLP
-        # Input: (num_workers * worker_dim) + (num_workers * 1)
         fusion_input_dim = num_workers * worker_dim + num_workers
         
         self.fusion = nn.Sequential(
@@ -117,34 +93,20 @@ class ConsensusFusion(nn.Module):
         embeddings: torch.Tensor, 
         logits: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Args:
-            embeddings: Worker embeddings [batch, num_workers, worker_dim]
-            logits: Worker predictions [batch, num_workers, num_classes]
-            
-        Returns:
-            context: Fused context vector [batch, hidden_dim]
-        """
         batch_size = embeddings.size(0)
+        attended = self.cross_attn(embeddings)
         
-        # 1. Cross-attention: Workers discuss
-        attended = self.cross_attn(embeddings)  # [batch, workers, dim]
+        probs = F.softmax(logits, dim=-1)
+        confidence = self.confidence_proj(probs)
+        confidence = torch.sigmoid(confidence)
         
-        # 2. Confidence scores from logits (max probability = confidence)
-        probs = F.softmax(logits, dim=-1)  # [batch, workers, 2]
-        confidence = self.confidence_proj(probs)  # [batch, workers, 1]
-        confidence = torch.sigmoid(confidence)  # Normalize to [0, 1]
+        weighted = attended * confidence
         
-        # 3. Weight embeddings by confidence
-        weighted = attended * confidence  # [batch, workers, dim]
-        
-        # 4. Flatten and fuse
-        flat_emb = weighted.view(batch_size, -1)  # [batch, workers * dim]
-        flat_conf = confidence.view(batch_size, -1)  # [batch, workers]
+        flat_emb = weighted.view(batch_size, -1)
+        flat_conf = confidence.view(batch_size, -1)
         
         combined = torch.cat([flat_emb, flat_conf], dim=-1)
-        
-        context = self.fusion(combined)  # [batch, hidden_dim]
+        context = self.fusion(combined)
         
         return context
 
@@ -152,13 +114,6 @@ class ConsensusFusion(nn.Module):
 class SwarmCoordinator(nn.Module):
     """
     The central brain of the Swarm Intelligence architecture.
-    
-    Receives worker embeddings/logits and produces final trading decision.
-    
-    Features:
-    - Cross-attention fusion for worker consensus
-    - CfC refinement layer for temporal context
-    - Dual expert heads (Long/Short) for asymmetric learning
     """
     
     def __init__(self, config: CoordinatorConfig = None):
@@ -169,7 +124,7 @@ class SwarmCoordinator(nn.Module):
         
         self.config = config
         
-        # Consensus fusion module (Synchronized with 3-class worker output)
+        # Consensus fusion
         self.fusion = ConsensusFusion(
             num_workers=config.num_workers,
             worker_dim=config.worker_dim,
@@ -177,14 +132,14 @@ class SwarmCoordinator(nn.Module):
             hidden_dim=config.hidden_dim
         )
         
-        # CfC refinement (single step, uses context as sequence of 1)
+        # CfC refinement
         self.cfc = CfCCell(
             input_dim=config.hidden_dim,
             hidden_dim=config.hidden_dim,
             dropout=config.dropout
         )
         
-        # Expert Heads (Mixture of Experts lite)
+        # Expert Heads
         self.long_expert = nn.Sequential(
             nn.Linear(config.hidden_dim, config.hidden_dim // 2),
             nn.SiLU(),
@@ -199,19 +154,17 @@ class SwarmCoordinator(nn.Module):
             nn.Linear(config.hidden_dim // 2, 1)
         )
         
+        # NEW: Multi-class Policy Head (0: Wait, 1: Long, 2: Short)
+        self.policy_head = nn.Linear(config.hidden_dim, 3)
+        
         self._init_weights()
         
     def _init_weights(self):
-        """Xavier init with zero bias for experts."""
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-        
-        # Initialize experts to output 0 (neutral)
-        nn.init.zeros_(self.long_expert[-1].bias)
-        nn.init.zeros_(self.short_expert[-1].bias)
         
     def forward(
         self, 
@@ -219,48 +172,30 @@ class SwarmCoordinator(nn.Module):
         worker_logits: torch.Tensor,
         dt: Optional[torch.Tensor] = None,
         hx: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            embeddings: Worker embeddings [batch, num_workers, worker_dim]
-            worker_logits: Worker predictions [batch, num_workers, 3]
-            dt: Optional time deltas [batch, 1, 1]
-            hx: Optional hidden state for CfC
-            
-        Returns:
-            logits: Final prediction logits [batch, 1]
-            long_score: Long expert confidence [batch, 1]
-            short_score: Short expert confidence [batch, 1]
-        """
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # 1. Fuse worker outputs
-        context = self.fusion(embeddings, worker_logits)  # [batch, hidden]
+        context = self.fusion(embeddings, worker_logits)
         
-        # 2. Refine through CfC (treat context as single-step sequence)
-        context_seq = context.unsqueeze(1)  # [batch, 1, hidden]
-        _, h_refined = self.cfc(context_seq, dt, hx)  # [batch, hidden]
+        # 2. Refine through CfC
+        context_seq = context.unsqueeze(1)
+        _, h_refined = self.cfc(context_seq, dt, hx)
         
         # 3. Expert heads
         long_score = self.long_expert(h_refined)
         short_score = self.short_expert(h_refined)
         
-        # 4. Differential logit (Long - Short)
-        logits = long_score - short_score
+        # 4. Policy logits
+        policy_logits = self.policy_head(h_refined)
         
-        return logits, long_score, short_score
+        # 5. Differential logit for backward compatibility
+        diff_logit = long_score - short_score
+        
+        return policy_logits, diff_logit, long_score, short_score
 
 
 class SwarmBrain(nn.Module):
     """
     Complete Swarm Intelligence model.
-    
-    Combines WorkerSwarm + SwarmCoordinator into a single
-    end-to-end trainable architecture.
-    
-    Memory estimate (fp16):
-    - 5 Workers: ~160KB * 5 = 800KB
-    - Coordinator: ~2MB
-    - Activations (batch=64): ~5MB
-    - Total: ~8MB (well under 12GB limit)
     """
     
     def __init__(
@@ -282,10 +217,7 @@ class SwarmBrain(nn.Module):
         self.worker_config = worker_config
         self.coordinator_config = coordinator_config
         
-        # The swarm of specialists
         self.swarm = WorkerSwarm(worker_config)
-        
-        # The coordinator brain
         self.coordinator = SwarmCoordinator(coordinator_config)
         
     def forward(
@@ -293,96 +225,17 @@ class SwarmBrain(nn.Module):
         x_dict: dict,
         hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        End-to-end forward pass.
-        
-        Args:
-            x_dict: Dictionary mapping timeframe -> tensor [batch, seq_len, features]
-            hx: Optional hidden state for Coordinator CfC
-            
-        Returns:
-            logits: Final prediction [batch, 1]
-            worker_logits: All worker predictions [batch, num_workers, 3]
-            long_score: Long expert score [batch, 1]
-            short_score: Short expert score [batch, 1]
-        """
         # 1. Process through worker swarm
         embeddings, worker_logits, _ = self.swarm(x_dict)
         
         # 2. Coordinate and decide
-        # We can pass an optional coordinator-level dt if available
         coord_dt = x_dict.get("coord_dt")
-        logits, long_score, short_score = self.coordinator(
+        policy_logits, diff_logit, long_score, short_score = self.coordinator(
             embeddings, worker_logits, coord_dt, hx
         )
         
-        return logits, worker_logits, long_score, short_score
+        # Return policy_logits as the primary decision logit
+        return policy_logits, worker_logits, long_score, short_score
     
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
-    
-    def get_worker_votes(self, worker_logits: torch.Tensor) -> dict:
-        """
-        Analyze worker voting pattern.
-        
-        Args:
-            worker_logits: [batch, num_workers, 2]
-            
-        Returns:
-            Dictionary with vote counts and agreement score
-        """
-        # Get predictions per worker
-        votes = worker_logits.argmax(dim=-1)  # [batch, workers]
-        
-        # Count votes (0=LONG, 1=SHORT)
-        n_long = (votes == 0).float().sum(dim=-1)
-        n_short = (votes == 1).float().sum(dim=-1)
-        
-        # Agreement score (how much workers agree)
-        max_votes = torch.stack([n_long, n_short], dim=-1).max(dim=-1).values
-        agreement = max_votes / self.swarm.num_workers
-        
-        return {
-            "n_long": n_long,
-            "n_short": n_short,
-            "agreement": agreement
-        }
-
-
-# Quick test
-if __name__ == "__main__":
-    print("Testing SwarmBrain...")
-    
-    # Configure
-    worker_cfg = WorkerConfig(input_dim=12, hidden_dim=32)
-    coord_cfg = CoordinatorConfig(num_workers=5, worker_dim=32, hidden_dim=128)
-    
-    # Create brain
-    brain = SwarmBrain(worker_cfg, coord_cfg)
-    
-    # Simulate multi-timeframe input
-    x_dict = {
-        "M5": torch.randn(64, 64, 12),
-        "M15": torch.randn(64, 32, 12),
-        "M30": torch.randn(64, 16, 12),
-        "H1": torch.randn(64, 8, 12),
-        "H4": torch.randn(64, 4, 12),
-    }
-    
-    # Forward pass
-    logits, worker_logits, long_score, short_score = brain(x_dict)
-    
-    print(f"  Final logits shape: {logits.shape}")
-    print(f"  Worker logits shape: {worker_logits.shape}")
-    print(f"  Long score shape: {long_score.shape}")
-    print(f"  Short score shape: {short_score.shape}")
-    print(f"  Total parameters: {brain.count_parameters():,}")
-    
-    # Test vote analysis
-    votes = brain.get_worker_votes(worker_logits)
-    print(f"  Sample agreement: {votes['agreement'][0]:.2f}")
-    
-    # Memory estimate
-    param_size = sum(p.numel() * p.element_size() for p in brain.parameters())
-    print(f"  Parameter memory: {param_size / 1024:.2f} KB")
-    print("  ✅ SwarmBrain OK!")

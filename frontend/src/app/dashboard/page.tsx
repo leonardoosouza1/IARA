@@ -182,52 +182,12 @@ function AgentCard({ agent }: { agent: Agent }) {
   );
 }
 
-// Demo agents for initial UI development
-const DEMO_AGENTS: Agent[] = [
-  {
-    id: "agent-btc-1",
-    symbol: "BTC/USD",
-    marketType: "crypto",
-    status: "in_trade",
-    modelName: "SwarmBrain v9",
-    pnl: 324.50,
-    winRate: 0.67,
-    totalTrades: 12,
-    currentPosition: { side: "long", entryPrice: 97500, currentPrice: 98200, size: 0.01, unrealizedPnl: 7.0, entryTime: "2026-02-17T10:00:00Z" },
-    lastSignal: null,
-    uptime: 7200,
-  },
-  {
-    id: "agent-eth-1",
-    symbol: "ETH/USD",
-    marketType: "crypto",
-    status: "thinking",
-    modelName: "SwarmBrain v9",
-    pnl: -42.30,
-    winRate: 0.45,
-    totalTrades: 8,
-    currentPosition: null,
-    lastSignal: null,
-    uptime: 5400,
-  },
-  {
-    id: "agent-eur-1",
-    symbol: "EUR/USD",
-    marketType: "forex",
-    status: "stalking",
-    modelName: "SwarmBrain v9",
-    pnl: 89.20,
-    winRate: 0.58,
-    totalTrades: 19,
-    currentPosition: null,
-    lastSignal: null,
-    uptime: 14400,
-  },
-];
+
+
 
 export default function FleetOverviewPage() {
   const storeAgents = useFleetStore((s) => s.agents);
-  const agents = storeAgents.length > 0 ? storeAgents : DEMO_AGENTS;
+  const agents = storeAgents;
 
   const totalPnl = agents.reduce((acc, a) => acc + a.pnl, 0);
   const activeCount = agents.filter((a) => a.status !== "idle" && a.status !== "paused").length;
@@ -245,89 +205,112 @@ export default function FleetOverviewPage() {
             Real-time status of all active agents
           </p>
         </div>
-        <Badge
-          variant="outline"
-          className={cn(
-            "text-sm px-3 py-1 font-mono",
-            totalPnl >= 0
-              ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/5"
-              : "border-red-500/30 text-red-400 bg-red-500/5",
-          )}
-        >
-          Total PnL: {formatPnl(totalPnl)}
-        </Badge>
+        {agents.length > 0 && (
+          <Badge
+            variant="outline"
+            className={cn(
+              "text-sm px-3 py-1 font-mono",
+              totalPnl >= 0
+                ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/5"
+                : "border-red-500/30 text-red-400 bg-red-500/5",
+            )}
+          >
+            Total PnL: {formatPnl(totalPnl)}
+          </Badge>
+        )}
       </div>
 
-      {/* Stats Bar */}
-      <div className="grid grid-cols-4 gap-4">
-        <Card className="bg-zinc-900/40 border-zinc-800/50">
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="h-10 w-10 rounded-lg bg-indigo-500/10 flex items-center justify-center">
-              <Brain className="h-5 w-5 text-indigo-400" />
-            </div>
-            <div>
-              <p className="text-xs text-zinc-500">Active Agents</p>
-              <p className="text-xl font-bold text-zinc-100 font-mono">
-                {activeCount}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
+      {agents.length === 0 ? (
+        <div className="flex flex-col items-center justify-center p-16 text-center rounded-xl border border-dashed border-zinc-800/60 bg-zinc-900/20">
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-800/50 mb-4">
+            <Brain className="h-8 w-8 text-zinc-600" />
+          </div>
+          <h3 className="text-xl font-bold text-zinc-300">No Active Agents</h3>
+          <p className="text-sm text-zinc-500 max-w-sm mt-2 mb-6">
+            Your fleet is empty. Go to the{" "}
+            <Link
+              href="/dashboard/agents"
+              className="text-indigo-400 hover:underline font-medium"
+            >
+              Agents Panel
+            </Link>{" "}
+            to create and activate trading agents.
+          </p>
+        </div>
+      ) : (
+        <>
+          {/* Stats Bar */}
+          <div className="grid grid-cols-4 gap-4">
+            <Card className="bg-zinc-900/40 border-zinc-800/50">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="h-10 w-10 rounded-lg bg-indigo-500/10 flex items-center justify-center">
+                  <Brain className="h-5 w-5 text-indigo-400" />
+                </div>
+                <div>
+                  <p className="text-xs text-zinc-500">Active Agents</p>
+                  <p className="text-xl font-bold text-zinc-100 font-mono">
+                    {activeCount}
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
 
-        <Card className="bg-zinc-900/40 border-zinc-800/50">
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="h-10 w-10 rounded-lg bg-emerald-500/10 flex items-center justify-center">
-              <Activity className="h-5 w-5 text-emerald-400" />
-            </div>
-            <div>
-              <p className="text-xs text-zinc-500">In Trade</p>
-              <p className="text-xl font-bold text-zinc-100 font-mono">
-                {inTradeCount}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
+            <Card className="bg-zinc-900/40 border-zinc-800/50">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="h-10 w-10 rounded-lg bg-emerald-500/10 flex items-center justify-center">
+                  <Activity className="h-5 w-5 text-emerald-400" />
+                </div>
+                <div>
+                  <p className="text-xs text-zinc-500">In Trade</p>
+                  <p className="text-xl font-bold text-zinc-100 font-mono">
+                    {inTradeCount}
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
 
-        <Card className="bg-zinc-900/40 border-zinc-800/50">
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="h-10 w-10 rounded-lg bg-amber-500/10 flex items-center justify-center">
-              <BarChart3 className="h-5 w-5 text-amber-400" />
-            </div>
-            <div>
-              <p className="text-xs text-zinc-500">Total Trades</p>
-              <p className="text-xl font-bold text-zinc-100 font-mono">
-                {agents.reduce((a, b) => a + (b.totalTrades || 0), 0)}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
+            <Card className="bg-zinc-900/40 border-zinc-800/50">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="h-10 w-10 rounded-lg bg-amber-500/10 flex items-center justify-center">
+                  <BarChart3 className="h-5 w-5 text-amber-400" />
+                </div>
+                <div>
+                  <p className="text-xs text-zinc-500">Total Trades</p>
+                  <p className="text-xl font-bold text-zinc-100 font-mono">
+                    {agents.reduce((a, b) => a + (b.totalTrades || 0), 0)}
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
 
-        <Card className="bg-zinc-900/40 border-zinc-800/50">
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="h-10 w-10 rounded-lg bg-purple-500/10 flex items-center justify-center">
-              <Zap className="h-5 w-5 text-purple-400" />
-            </div>
-            <div>
-              <p className="text-xs text-zinc-500">Fleet PnL</p>
-              <p
-                className={cn(
-                  "text-xl font-bold font-mono",
-                  totalPnl >= 0 ? "text-emerald-400" : "text-red-400",
-                )}
-              >
-                {formatPnl(totalPnl)}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+            <Card className="bg-zinc-900/40 border-zinc-800/50">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="h-10 w-10 rounded-lg bg-purple-500/10 flex items-center justify-center">
+                  <Zap className="h-5 w-5 text-purple-400" />
+                </div>
+                <div>
+                  <p className="text-xs text-zinc-500">Fleet PnL</p>
+                  <p
+                    className={cn(
+                      "text-xl font-bold font-mono",
+                      totalPnl >= 0 ? "text-emerald-400" : "text-red-400",
+                    )}
+                  >
+                    {formatPnl(totalPnl)}
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
 
-      {/* Agent Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        {agents.map((agent) => (
-          <AgentCard key={agent.id} agent={agent} />
-        ))}
-      </div>
+          {/* Agent Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {agents.map((agent) => (
+              <AgentCard key={agent.id} agent={agent} />
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

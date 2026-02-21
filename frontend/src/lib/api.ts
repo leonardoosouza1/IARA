@@ -100,7 +100,14 @@ class ApiClient {
       },
     });
 
-    if (!res.ok) throw new Error(`API Error: ${res.status}`);
+    if (!res.ok) {
+      if (res.status === 401) {
+        window.location.href = "/login";
+        throw new Error("Unauthorized");
+      }
+      const errorBody = await res.json().catch(() => ({}));
+      throw new Error(errorBody.detail || `API Error: ${res.status}`);
+    }
     return res.json();
   }
 }

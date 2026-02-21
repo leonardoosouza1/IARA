@@ -99,7 +99,7 @@ export default function AgentsPage() {
         id,
         symbol: newSymbol,
         market_type: newMarketType,
-        model_version: newModel || "SwarmBrain v9.7" // Fallback
+        model_version: newModel || "active_model.pth", // Fallback
       });
       toast.success("Agent profile created!");
       setShowModal(false);
@@ -111,6 +111,12 @@ export default function AgentsPage() {
   };
 
   const handleDelete = async (id: string) => {
+    if (
+      !confirm(
+        `Are you sure you want to delete agent "${id}"? This cannot be undone.`,
+      )
+    )
+      return;
     try {
       await api.delete(`/api/v1/agents/${id}`);
       toast.success("Agent profile deleted");
