@@ -17,6 +17,7 @@ from src.database.models import Trade, Signal, ModelVersion
 from src.brain.models.liquid_v9 import SwarmBrain, CoordinatorConfig
 from src.brain.models.workers import WorkerConfig
 from src.brain.losses import SwarmLoss # 🚀 Swarm v9.7 Loss
+from src.brain.models.generator import ChallengerGenerator, OverfittingGuard # 🚀 Phase 13
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ContinuousLearner")
@@ -66,6 +67,11 @@ class ContinuousLearner:
         # 🚀 Phase 11: SwarmLoss with Dynamic Weighting
         self.criterion = SwarmLoss(alpha=0.75, gamma=2.0, consensus_weight=0.1).to(self.device)
         self.scaler = torch.amp.GradScaler('cuda', enabled=(self.device.type == "cuda"))
+
+        # 🚀 Phase 13: Adversarial Components
+        self.challenger = ChallengerGenerator(input_dim=12, hidden_dim=64).to(self.device)
+        self.challenger_opt = torch.optim.AdamW(self.challenger.parameters(), lr=1e-4)
+        self.guard = OverfittingGuard(ema_alpha=0.1).to(self.device)
 
     def _load_model(self) -> SwarmBrain:
         worker_cfg = WorkerConfig(input_dim=12, hidden_dim=self.worker_hidden)
@@ -324,29 +330,56 @@ class ContinuousLearner:
                     # 🚀 Phase 11: Feature Sanitization
                     batch_X = torch.nan_to_num(batch_X)
                     
+                    # 🚀 Phase 13: Adversarial "Prank" Generation
+                    # 30% chance to face a 'Prank' from the Challenger
+                    is_adversarial = torch.rand(1).item() < 0.3
+                    current_pressure = self.guard.get_pressure()
+                    
+                    if is_adversarial:
+                        # Challenger attempts to 'prank' the features to confuse the Trader
+                        self.challenger.eval() # Generator doesn't update its own weights during this pass
+                        batch_X_orig = batch_X.clone()
+                        with torch.no_grad():
+                            batch_X = self.challenger(batch_X, pressure=current_pressure)
+                    
                     self.optimizer.zero_grad()
                     x_dict = self._simulate_timeframes(batch_X)
                     
                     with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
                         logits, worker_logits, _, _ = self.model(x_dict)
-                        
-                        # 🚀 Phase 11: Golden Dataset Labels (0: Long, 1: Short, 2: Neutral)
-                        # SwarmLoss now handles the 3-class target directly.
                         loss_dict = self.criterion(logits, worker_logits, batch_y)
                         loss = loss_dict["total"]
 
                     if torch.isnan(loss):
-                        # Don't fail the whole epoch, just skip this noisy batch
                         continue
 
+                    # Trader Update: Minimize Loss
                     self.scaler.scale(loss).backward()
-                    
-                    # 🚀 Phase 11: Gradient Clipping
                     self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
+
+                    # Challenger Update: Maximize Trader's Error (Pegadinha)
+                    # Only update challenger on adversarial batches
+                    if is_adversarial:
+                        self.challenger.train()
+                        self.challenger_opt.zero_grad()
+                        
+                        # We want to MAXIMIZE trader loss by modifying Challenger weights
+                        # We re-run forward with gradients on the Challenger
+                        batch_X_adv = self.challenger(batch_X_orig, pressure=current_pressure)
+                        x_dict_adv = self._simulate_timeframes(batch_X_adv)
+                        
+                        with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
+                            logits_adv, worker_logits_adv, _, _ = self.model(x_dict_adv)
+                            loss_adv_dict = self.criterion(logits_adv, worker_logits_adv, batch_y)
+                            # Negative loss because we want to maximize it
+                            challenger_loss = -loss_adv_dict["total"] 
+                        
+                        self.scaler.scale(challenger_loss).backward()
+                        self.scaler.step(self.challenger_opt)
+                        self.scaler.update()
                     
                     # 🚀 Phase 11: Multi-Class Metrics (Accuracy, Precision)
                     from sklearn.metrics import accuracy_score, precision_score
@@ -375,6 +408,32 @@ class ContinuousLearner:
                         callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | Swarm: {thought_str} | W: {sw_weights} | {progress}%")
                 
                 shard_count += 1
+
+            # 🚀 Phase 13: Validation Pass & OverfittingGuard Update
+            val_shard_dir = f"data/cache/{dataset_name}/val_shards"
+            if os.path.exists(val_shard_dir):
+                self.model.eval()
+                val_loss = 0.0
+                val_batches = 0
+                val_shards = sorted([f for f in os.listdir(val_shard_dir) if f.endswith(".pt")])
+                
+                with torch.no_grad():
+                    for v_shard in val_shards[:2]: # Sample 2 shards for speed
+                        v_data = torch.load(os.path.join(val_shard_dir, v_shard), map_location='cpu')
+                        v_X, v_y = v_data['X'].to(self.device), v_data['y'].to(self.device).long()
+                        
+                        v_x_dict = self._simulate_timeframes(v_X)
+                        v_logits, v_worker_logits, _, _ = self.model(v_x_dict)
+                        v_loss_dict = self.criterion(v_logits, v_worker_logits, v_y)
+                        val_loss += v_loss_dict["total"].item()
+                        val_batches += 1
+                
+                if val_batches > 0:
+                    avg_val_loss = val_loss / val_batches
+                    avg_train_loss = epoch_loss / epoch_batches
+                    self.guard.update(avg_train_loss, avg_val_loss)
+                    pressure = self.guard.get_pressure()
+                    if callback: callback(f"🛡️ Guard: Precision-Recall Check | Pressure: {pressure:.2f} | Val Loss: {avg_val_loss:.4f}")
 
             if epoch_batches > 0:
                 avg_epoch_loss = epoch_loss / epoch_batches

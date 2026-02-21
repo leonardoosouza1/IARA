@@ -29,6 +29,7 @@ training_state = {
     "last_loss": None,
     "last_acc": None,
     "last_prec": None,
+    "pressure": 1.0,
     "last_run": None,
     "message": "Idle",
     "progress": 0,  # 0 to 100
@@ -91,6 +92,10 @@ def run_training_background(protocol: Dict[str, Any]):
             prec_match = re.search(r'Prec:\s*([\d.]+)', msg)
             if prec_match:
                 training_state["last_prec"] = float(prec_match.group(1))
+
+            pressure_match = re.search(r'Pressure:\s*([\d.]+)', msg)
+            if pressure_match:
+                training_state["pressure"] = float(pressure_match.group(1))
 
         checkpoint_name = protocol.get("base_model")
         checkpoint_path = f"logs/models/{checkpoint_name}" if checkpoint_name else None

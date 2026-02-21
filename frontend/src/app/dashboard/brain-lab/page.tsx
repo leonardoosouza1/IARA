@@ -40,6 +40,7 @@ interface TrainingStatus {
   last_loss: number | null;
   last_acc: number | null;
   last_prec: number | null;
+  pressure: number;
   last_run: string | null;
   message: string;
   progress: number;
@@ -79,6 +80,7 @@ interface MetricPoint {
   loss: number;
   acc: number;
   prec: number;
+  pressure: number;
 }
 
 export default function BrainLabPage() {
@@ -147,6 +149,7 @@ export default function BrainLabPage() {
               loss: statusRes.last_loss as number,
               acc: statusRes.last_acc || 0,
               prec: statusRes.last_prec || 0,
+              pressure: statusRes.pressure || 1.0,
             },
           ];
           return newHistory.slice(-50); // Keep last 50 points
@@ -305,6 +308,17 @@ export default function BrainLabPage() {
               : "0.0%"
           }
           color="amber"
+        />
+        <MetricCard
+          icon={<FlaskConical className="h-5 w-5" />}
+          label="Challenger Pressure"
+          value={
+            trainingStatus?.pressure
+              ? trainingStatus.pressure.toFixed(2)
+              : "1.00"
+          }
+          color="rose"
+          subValue={trainingStatus?.is_training ? "Active Pranks" : "Ready"}
         />
         <MetricCard
           icon={<Database className="h-5 w-5" />}
@@ -672,6 +686,16 @@ export default function BrainLabPage() {
                     fill="url(#colorAcc)"
                     name="Accuracy"
                   />
+                  <Area
+                    yAxisId="right"
+                    type="monotone"
+                    dataKey="pressure"
+                    stroke="#f43f5e"
+                    strokeWidth={1}
+                    strokeDasharray="3 3"
+                    fillOpacity={0}
+                    name="Challenger"
+                  />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
@@ -980,7 +1004,7 @@ function MetricCard({
   label: string;
   value: string;
   trend?: string;
-  color: "indigo" | "purple" | "amber" | "emerald" | "zinc";
+  color: "indigo" | "purple" | "amber" | "emerald" | "zinc" | "rose";
   subValue?: string;
 }) {
   const colors = {
@@ -989,6 +1013,7 @@ function MetricCard({
     amber: "text-amber-400 bg-amber-500/10 border-amber-500/20",
     emerald: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
     zinc: "text-zinc-400 bg-zinc-500/10 border-zinc-500/20",
+    rose: "text-rose-400 bg-rose-500/10 border-rose-500/20",
   };
 
   return (
