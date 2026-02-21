@@ -27,6 +27,8 @@ logger = logging.getLogger("api.brain")
 training_state = {
     "is_training": False,
     "last_loss": None,
+    "last_acc": None,
+    "last_prec": None,
     "last_run": None,
     "message": "Idle",
     "progress": 0,  # 0 to 100
@@ -81,6 +83,14 @@ def run_training_background(protocol: Dict[str, Any]):
             loss_match = re.search(r'Loss:\s*([\d.]+)', msg)
             if loss_match:
                 training_state["last_loss"] = float(loss_match.group(1))
+            
+            acc_match = re.search(r'Acc:\s*([\d.]+)', msg)
+            if acc_match:
+                training_state["last_acc"] = float(acc_match.group(1))
+                
+            prec_match = re.search(r'Prec:\s*([\d.]+)', msg)
+            if prec_match:
+                training_state["last_prec"] = float(prec_match.group(1))
 
         checkpoint_name = protocol.get("base_model")
         checkpoint_path = f"logs/models/{checkpoint_name}" if checkpoint_name else None
@@ -183,7 +193,7 @@ async def stop_training():
 async def trigger_data_fetch(request: FetchRequest):
     global data_state
     if data_state["is_fetching"]:
-        return {"message": "Data fetch already in progress", "status": data_state}
+        return {"message": "Data Pipeline already active", "status": data_state}
     request_dict = request.dict()
     threading.Thread(target=run_data_fetch_background, args=(request_dict,)).start()
     return {"message": "Data fetch initiated", "status": data_state}

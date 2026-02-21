@@ -115,24 +115,21 @@ class WorkerAuxiliaryLoss(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            worker_logits: All worker predictions [batch, num_workers, 2]
-            targets: Binary targets [batch] (0=SHORT, 1=LONG)
+            worker_logits: All worker predictions [batch, num_workers, 3]
+            targets: Action targets [batch] {0, 1, 2}
             
         Returns:
             Average auxiliary loss across all workers
         """
         batch_size, num_workers, num_classes = worker_logits.shape
         
-        # Convert targets to binary long
-        worker_targets = (targets > 0.5).long() # [batch]
-        
         total_loss = torch.tensor(0.0, device=targets.device)
         
         for w in range(num_workers):
-            w_logits = worker_logits[:, w, :]  # Pure binary (0, 1)
+            w_logits = worker_logits[:, w, :]  # [Batch, 3]
             loss = F.cross_entropy(
                 w_logits, 
-                worker_targets,
+                targets,
                 label_smoothing=self.label_smoothing
             )
             total_loss = total_loss + loss
@@ -173,40 +170,39 @@ class ConsensusLoss(nn.Module):
         """
         batch_size = coord_logits.size(0)
         
-        # Coordinator probability
-        coord_prob = torch.sigmoid(coord_logits.view(-1))  # [batch]
+        # Coordinator probabilities (0=Long, 1=Short, 2=Wait)
+        coord_probs = F.softmax(coord_logits, dim=-1)  # [batch, 3]
+        coord_long_prob = coord_probs[:, 0]
+        coord_short_prob = coord_probs[:, 1]
         
         # Worker probabilities
         worker_probs = F.softmax(worker_logits, dim=-1)  # [batch, workers, 3]
         
-        # Worker votes (0=LONG, 1=SHORT, 2=NEUTRAL)
+        # Worker votes
         worker_votes = worker_logits.argmax(dim=-1)  # [batch, workers]
         
         # Worker confidence (max probability)
-        worker_conf, _ = worker_probs.max(dim=-1)  # [batch, workers]
+        worker_conf = worker_probs.max(dim=-1)[0]  # [batch, workers]
         
         # Count confident votes
         confident_mask = worker_conf > self.threshold
         
         # Count confident LONG votes
-        long_votes = (worker_votes == 0) & confident_mask
-        n_long = long_votes.float().sum(dim=-1)  # [batch]
+        n_long = ((worker_votes == 0) & confident_mask).float().sum(dim=-1)
         
         # Count confident SHORT votes
-        short_votes = (worker_votes == 1) & confident_mask
-        n_short = short_votes.float().sum(dim=-1)  # [batch]
+        n_short = ((worker_votes == 1) & confident_mask).float().sum(dim=-1)
         
         # Consensus disagreement penalty
-        # If workers say LONG but Coordinator says SHORT
+        # If workers say LONG but Coordinator Long prob is low
         long_consensus = (n_long >= self.consensus_min).float()
-        long_penalty = long_consensus * F.relu(0.5 - coord_prob)  # Penalize low prob
+        long_penalty = long_consensus * F.relu(0.5 - coord_long_prob)
         
-        # If workers say SHORT but Coordinator says LONG
+        # If workers say SHORT but Coordinator Short prob is low
         short_consensus = (n_short >= self.consensus_min).float()
-        short_penalty = short_consensus * F.relu(coord_prob - 0.5)  # Penalize high prob
+        short_penalty = short_consensus * F.relu(0.5 - coord_short_prob)
         
         total_penalty = long_penalty + short_penalty
-        
         return total_penalty.mean()
 
 
@@ -245,7 +241,8 @@ class SwarmLoss(nn.Module):
         self.weight_logits = nn.Parameter(torch.tensor([2.5, 0.0, 0.0]))
         
         # Sub-losses
-        self.coord_loss = AsymmetricFocalLoss(alpha=alpha, gamma=gamma)
+        self.coord_loss = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+        self.focal_alt = AsymmetricFocalLoss(alpha=alpha, gamma=gamma) # Still keep for binary auxiliary if needed
         self.worker_loss = WorkerAuxiliaryLoss(
             num_classes=3, 
             label_smoothing=label_smoothing
@@ -261,11 +258,20 @@ class SwarmLoss(nn.Module):
     ) -> dict:
         """
         Compute all losses with automatic Natural Scaling.
-        Weights always sum to 1.0, keeping Loss in the 0.0 - 1.0 range.
+        Targets: [Batch] with values {0: Long, 1: Short, 2: Neutral}
         """
         # 1. Compute individual losses
-        l_coord = self.coord_loss(coord_logits, targets, weight)
-        l_workers = self.worker_loss(worker_logits, targets)
+        
+        # Coordinator is now 3-class {Long, Short, Neutral}
+        # coord_logits shape: [Batch, 3]
+        # targets shape: [Batch]
+        l_coord = F.cross_entropy(coord_logits, targets.long(), reduction='none')
+        if weight is not None:
+             l_coord = (l_coord * weight).mean()
+        else:
+             l_coord = l_coord.mean()
+             
+        l_workers = self.worker_loss(worker_logits, targets.long())
         l_consensus = self.consensus_loss(coord_logits, worker_logits)
         
         # 2. Natural Dynamic Weighting (Softmax)

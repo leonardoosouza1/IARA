@@ -5,7 +5,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  Brain,
   FlaskConical,
   Play,
   Loader2,
@@ -26,10 +25,21 @@ import {
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import {
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+} from "recharts";
 
 interface TrainingStatus {
   is_training: boolean;
   last_loss: number | null;
+  last_acc: number | null;
+  last_prec: number | null;
   last_run: string | null;
   message: string;
   progress: number;
@@ -64,6 +74,13 @@ interface TradeRecord {
   timestamp: string;
 }
 
+interface MetricPoint {
+  time: string;
+  loss: number;
+  acc: number;
+  prec: number;
+}
+
 export default function BrainLabPage() {
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(
     null,
@@ -73,6 +90,7 @@ export default function BrainLabPage() {
   const [loading, setLoading] = useState(true);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
+  const [metricHistory, setMetricHistory] = useState<MetricPoint[]>([]);
 
   const [protocol, setProtocol] = useState({
     mode: "finetune",
@@ -106,6 +124,34 @@ export default function BrainLabPage() {
       setModels(modelsRes || []);
       setDataStatus(dataStatusRes);
       setDatasets(datasetsRes || []);
+
+      // Update Metric History for Chart
+      if (statusRes.is_training && statusRes.last_loss !== null) {
+        setMetricHistory((prev) => {
+          const last = prev[prev.length - 1];
+          // Only add if it's a new batch to avoid redundant points
+          if (
+            last?.loss === statusRes.last_loss &&
+            last?.acc === statusRes.last_acc
+          )
+            return prev;
+
+          const newHistory = [
+            ...prev,
+            {
+              time: new Date().toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              }),
+              loss: statusRes.last_loss as number,
+              acc: statusRes.last_acc || 0,
+              prec: statusRes.last_prec || 0,
+            },
+          ];
+          return newHistory.slice(-50); // Keep last 50 points
+        });
+      }
 
       // Auto-select first dataset if none selected and source is historical
       if (
@@ -160,10 +206,10 @@ export default function BrainLabPage() {
   const handleFetchData = async () => {
     try {
       await api.post("/api/v1/brain/data/fetch", fetchRequest);
-      toast.success("Data fetch initiated!");
+      toast.success("Data Pipeline initiated! Check logs below.");
       fetchData();
     } catch (error: any) {
-      toast.error(error.message || "Failed to start data fetch.");
+      toast.error(error.message || "Failed to start data pipeline.");
     }
   };
 
@@ -228,34 +274,49 @@ export default function BrainLabPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard
-          icon={<Brain className="h-5 w-5" />}
-          label="Last Loss"
+          icon={<Activity className="h-5 w-5" />}
+          label="Training Loss"
           value={
             trainingStatus?.last_loss
               ? trainingStatus.last_loss.toFixed(4)
-              : "N/A"
+              : "0.0000"
           }
           color="indigo"
+          subValue={trainingStatus?.is_training ? "Computing..." : "Idle"}
         />
         <MetricCard
-          icon={<History className="h-5 w-5" />}
-          label="Decisions Analyzed"
-          value={trades.length.toString()}
-          color="purple"
+          icon={<TrendingUp className="h-5 w-5" />}
+          label="Precision (Avg)"
+          value={
+            trainingStatus?.last_prec
+              ? `${(trainingStatus.last_prec * 100).toFixed(1)}%`
+              : "0.0%"
+          }
+          color="emerald"
+        />
+        <MetricCard
+          icon={<Award className="h-5 w-5" />}
+          label="Accuracy"
+          value={
+            trainingStatus?.last_acc
+              ? `${(trainingStatus.last_acc * 100).toFixed(1)}%`
+              : "0.0%"
+          }
+          color="amber"
         />
         <MetricCard
           icon={<Database className="h-5 w-5" />}
           label="Datasets Ready"
           value={datasets.length.toString()}
-          color="amber"
+          color="purple"
         />
         <MetricCard
-          icon={<Award className="h-5 w-5" />}
-          label="Zoo Models"
-          value={models.length.toString()}
-          color="emerald"
+          icon={<History className="h-5 w-5" />}
+          label="Journal Size"
+          value={trades.length.toString()}
+          color="zinc"
         />
       </div>
 
@@ -473,49 +534,146 @@ export default function BrainLabPage() {
               </div>
             </div>
           </CardHeader>
-          <CardContent className="p-4 flex flex-col h-[400px]">
-            <div className="flex-1 bg-black/60 rounded-lg p-4 font-mono text-xs overflow-y-auto space-y-1 border border-zinc-800 shadow-inner text-emerald-400/90 [scrollbar-width:none]">
-              {trainingStatus?.logs && trainingStatus.logs.length > 0 ? (
-                trainingStatus.logs.map((log, i) => (
-                  <div
-                    key={i}
-                    className={cn(
-                      "transition-opacity duration-300",
-                      i === trainingStatus.logs.length - 1
-                        ? "text-emerald-400 font-bold"
-                        : "text-emerald-500/40",
-                    )}
-                  >
-                    <span className="text-zinc-700 mr-2">$</span>
-                    {log}
+          <CardContent className="p-4 flex flex-col h-[500px] gap-4">
+            <div className="flex gap-4 h-1/2">
+              {/* Visual Console */}
+              <div className="flex-1 bg-black/60 rounded-lg p-4 font-mono text-[10px] overflow-y-auto space-y-1 border border-zinc-800 shadow-inner text-emerald-400/90 [scrollbar-width:none]">
+                {trainingStatus?.logs && trainingStatus.logs.length > 0 ? (
+                  trainingStatus.logs.map((log, i) => (
+                    <div
+                      key={i}
+                      className={cn(
+                        "transition-opacity duration-300",
+                        i === trainingStatus.logs.length - 1
+                          ? "text-emerald-400 font-bold"
+                          : "text-emerald-500/40",
+                      )}
+                    >
+                      <span className="text-zinc-700 mr-2">$</span>
+                      {log}
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-zinc-700 italic text-xs">
+                    Waiting for protocol execution command...
                   </div>
-                ))
-              ) : (
-                <div className="text-zinc-700 italic">
-                  Waiting for protocol execution command...
+                )}
+              </div>
+
+              {/* Swarm Insight (Macro/Micro) */}
+              <div className="w-64 bg-zinc-950/40 border border-zinc-800 rounded-lg p-4 flex flex-col items-center justify-center space-y-4">
+                <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest text-center">
+                  Swarm Thoughts
+                </p>
+                <div className="flex flex-col gap-2 w-full">
+                  {["M5", "M15", "M30", "H1", "H4"].map((tf, i) => {
+                    // Extract last vote from logs if available
+                    const lastLog =
+                      trainingStatus?.logs[trainingStatus.logs.length - 1] ||
+                      "";
+                    const swarmMatch = lastLog.match(/Swarm: ([L|S|W-]+)/);
+                    const votes = swarmMatch
+                      ? swarmMatch[1].split("-")
+                      : ["W", "W", "W", "W", "W"];
+                    const vote = votes[i] || "W";
+
+                    return (
+                      <div
+                        key={tf}
+                        className="flex items-center justify-between bg-black/20 px-3 py-1.5 rounded border border-zinc-800/50"
+                      >
+                        <span className="text-[10px] font-bold text-zinc-500">
+                          {tf} Specialist
+                        </span>
+                        <Badge
+                          className={cn(
+                            "text-[9px] px-1.5 h-4 border-none",
+                            vote === "L"
+                              ? "bg-emerald-500/20 text-emerald-400"
+                              : vote === "S"
+                                ? "bg-rose-500/20 text-rose-400"
+                                : "bg-zinc-800 text-zinc-500",
+                          )}
+                        >
+                          {vote === "L"
+                            ? "LONG"
+                            : vote === "S"
+                              ? "SHORT"
+                              : "WAIT"}
+                        </Badge>
+                      </div>
+                    );
+                  })}
                 </div>
-              )}
+                <div className="pt-2 border-t border-zinc-800 w-full text-center">
+                  <p className="text-[9px] text-zinc-600 italic">
+                    Coordinator Confidence
+                  </p>
+                  <div className="mt-1 h-1 w-full bg-zinc-900 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-500"
+                      style={{
+                        width: `${(trainingStatus?.last_acc || 0) * 100}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
 
-            <div className="mt-4 grid grid-cols-3 gap-4">
-              <div className="p-3 bg-zinc-950/40 border border-zinc-800 rounded-lg">
-                <p className="text-[10px] text-zinc-500 uppercase font-bold mb-1">
-                  Current Loss
-                </p>
-                <p className="text-xl font-mono text-indigo-400 font-bold">
-                  {trainingStatus?.last_loss
-                    ? trainingStatus.last_loss.toFixed(4)
-                    : "---"}
-                </p>
-              </div>
-              <div className="p-3 bg-zinc-950/40 border border-zinc-800 rounded-lg col-span-2">
-                <p className="text-[10px] text-zinc-500 uppercase font-bold mb-1">
-                  Status Message
-                </p>
-                <p className="text-sm text-zinc-300 truncate">
-                  {trainingStatus?.message || "Waiting for user input"}
-                </p>
-              </div>
+            {/* Metrics Chart */}
+            <div className="flex-1 min-h-0 bg-zinc-950/20 rounded-lg border border-zinc-800/50 p-2">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={metricHistory}>
+                  <defs>
+                    <linearGradient id="colorLoss" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#6366f1" stopOpacity={0.1} />
+                      <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
+                    </linearGradient>
+                    <linearGradient id="colorAcc" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.1} />
+                      <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    stroke="#18181b"
+                    vertical={false}
+                  />
+                  <XAxis dataKey="time" hide />
+                  <YAxis yAxisId="left" hide domain={[0, "auto"]} />
+                  <YAxis yAxisId="right" hide domain={[0, 1]} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "#09090b",
+                      border: "1px solid #27272a",
+                      borderRadius: "8px",
+                      fontSize: "10px",
+                    }}
+                    itemStyle={{ padding: "0px" }}
+                  />
+                  <Area
+                    yAxisId="left"
+                    type="monotone"
+                    dataKey="loss"
+                    stroke="#6366f1"
+                    strokeWidth={2}
+                    fillOpacity={1}
+                    fill="url(#colorLoss)"
+                    name="Loss"
+                  />
+                  <Area
+                    yAxisId="right"
+                    type="monotone"
+                    dataKey="acc"
+                    stroke="#10b981"
+                    strokeWidth={2}
+                    fillOpacity={1}
+                    fill="url(#colorAcc)"
+                    name="Accuracy"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
             </div>
           </CardContent>
         </Card>
@@ -816,39 +974,43 @@ function MetricCard({
   value,
   trend,
   color,
+  subValue,
 }: {
   icon: React.ReactNode;
   label: string;
   value: string;
   trend?: string;
-  color: "indigo" | "purple" | "amber" | "emerald";
+  color: "indigo" | "purple" | "amber" | "emerald" | "zinc";
+  subValue?: string;
 }) {
   const colors = {
     indigo: "text-indigo-400 bg-indigo-500/10 border-indigo-500/20",
     purple: "text-purple-400 bg-purple-500/10 border-purple-500/20",
     amber: "text-amber-400 bg-amber-500/10 border-amber-500/20",
     emerald: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+    zinc: "text-zinc-400 bg-zinc-500/10 border-zinc-500/20",
   };
 
   return (
     <Card className="bg-zinc-900/30 border-zinc-800/60 p-5 group hover:border-zinc-700 transition-all duration-300">
       <div className="flex items-center justify-between mb-4">
         <div className={cn("p-2 rounded-lg border", colors[color])}>{icon}</div>
-        {trend && (
+        {(trend || subValue) && (
           <div
             className={cn(
               "text-[10px] font-black px-1.5 py-0.5 rounded flex items-center gap-1",
-              trend.startsWith("+")
+              trend?.startsWith("+") || !trend
                 ? "bg-emerald-500/10 text-emerald-500"
                 : "bg-rose-500/10 text-rose-500",
             )}
           >
-            {trend.startsWith("+") ? (
-              <TrendingUp className="h-2.5 w-2.5" />
-            ) : (
-              <TrendingDown className="h-2.5 w-2.5" />
-            )}
-            {trend}
+            {trend &&
+              (trend.startsWith("+") ? (
+                <TrendingUp className="h-2.5 w-2.5" />
+              ) : (
+                <TrendingDown className="h-2.5 w-2.5" />
+              ))}
+            {trend || subValue}
           </div>
         )}
       </div>

@@ -16,6 +16,7 @@ load_dotenv()
 from src.database.models import Trade, Signal, ModelVersion
 from src.brain.models.liquid_v9 import SwarmBrain, CoordinatorConfig
 from src.brain.models.workers import WorkerConfig
+from src.brain.losses import SwarmLoss # 🚀 Swarm v9.7 Loss
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ContinuousLearner")
@@ -61,7 +62,10 @@ class ContinuousLearner:
         
         self.model = self._load_model()
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
-        self.criterion = nn.CrossEntropyLoss().to(self.device)
+        
+        # 🚀 Phase 11: SwarmLoss with Dynamic Weighting
+        self.criterion = SwarmLoss(alpha=0.75, gamma=2.0, consensus_weight=0.1).to(self.device)
+        self.scaler = torch.amp.GradScaler('cuda', enabled=(self.device.type == "cuda"))
 
     def _load_model(self) -> SwarmBrain:
         worker_cfg = WorkerConfig(input_dim=12, hidden_dim=self.worker_hidden)
@@ -114,15 +118,32 @@ class ContinuousLearner:
             if pnl < 0:
                 ideal_action = 0 
             
-            target_scalar = 0
+            # 🚀 Phase 11: Standardized Mapping (0: Long, 1: Short, 2: Wait)
+            target_scalar = 2 # Default to Wait
             if ideal_action == 1:
-                target_scalar = 1
+                target_scalar = 0 # Long
             elif ideal_action == -1:
-                target_scalar = 2
+                target_scalar = 1 # Short
                 
-            dummy_sequence = torch.zeros(1, self.seq_len, 12).to(self.device)
-            X.append(dummy_sequence)
-            Y.append(target_scalar)
+            # 🚀 Phase 11: Correct Data Parsing (No more Dummies)
+            # Parse the features_snapshot from the Signal
+            try:
+                features = torch.tensor(signal.features_snapshot, dtype=torch.float32)
+                if features.dim() == 2: # [seq_len, dim]
+                    features = features.unsqueeze(0) # [1, seq_len, dim]
+                
+                # Truncate/Pad to match seq_len and feature_dim
+                if features.shape[1] > self.seq_len:
+                    features = features[:, -self.seq_len:, :]
+                
+                if features.shape[2] > 12:
+                    features = features[:, :, :12]
+                    
+                X.append(features.to(self.device))
+                Y.append(target_scalar)
+            except Exception as e:
+                logger.error(f"Failed to parse snapshot for signal {signal.id}: {e}")
+                continue
             
         if not X:
             return None, None, set()
@@ -131,6 +152,31 @@ class ContinuousLearner:
         y_tensor = torch.tensor(Y, dtype=torch.long).to(self.device)
         
         return x_tensor, y_tensor, symbols_seen
+
+    def _simulate_timeframes(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Simulates the Multi-Timeframe Brain views from a single M1 sequence.
+        Downsamples the [B, L, C] tensor to provide specialists with localized views.
+        """
+        seq_len = x.shape[1]
+        x_dict = {}
+        
+        # M5: Standard view
+        x_dict["M5"] = x
+        
+        # M15: Every 3rd candle
+        x_dict["M15"] = x[:, ::3, :]
+        
+        # M30: Every 6th candle
+        x_dict["M30"] = x[:, ::6, :]
+        
+        # H1: Every 12th candle
+        x_dict["H1"] = x[:, ::12, :]
+        
+        # H4: Every 48th candle
+        x_dict["H4"] = x[:, ::16, :] # Truncated to avoid too small sequences in test
+        
+        return x_dict
 
     def train_and_evaluate(self, callback=None, stop_check=None):
         if callback: callback(f"🖥️ Device: {self.device} | Building dataset from Trade Journal...")
@@ -170,12 +216,35 @@ class ContinuousLearner:
                 batch_y = y_tensor[i : i + self.batch_size].to(self.device)
                 
                 self.optimizer.zero_grad()
-                ctx = torch.zeros(len(batch_X), self.coord_hidden).to(self.device)
-                x_dict = {"M5": batch_X}
-                logits, _, _, _ = self.model(x_dict, ctx)
-                loss = self.criterion(logits, batch_y)
-                loss.backward()
-                self.optimizer.step()
+                
+                # 🚀 Swarm Implementation: Multi-TF Input
+                x_dict = self._simulate_timeframes(batch_X)
+                
+                with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
+                    logits, worker_logits, _, _ = self.model(x_dict)
+                with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
+                    logits, worker_logits, _, _ = self.model(x_dict)
+                    
+                    # 🚀 Phase 11: Swarm v9.7 Targets {0: Long, 1: Short, 2: Wait}
+                    # Give 3x weight to "Wait" actions (which represent error corrections in Journal)
+                    sample_weights = torch.ones_like(batch_y).float()
+                    sample_weights[batch_y == 2] *= 3.0 
+                    
+                    loss_dict = self.criterion(logits, worker_logits, batch_y, weight=sample_weights)
+                    loss = loss_dict["total"]
+
+                if torch.isnan(loss):
+                    if callback: callback(f"⚠️ Warning: NaN detected in Batch {batch_count+1}. Skipping update.")
+                    continue
+
+                self.scaler.scale(loss).backward()
+                
+                # 🚀 Phase 11: Gradient Clipping for Stability
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
                 
                 epoch_loss += loss.item()
                 batch_count += 1
@@ -252,18 +321,42 @@ class ContinuousLearner:
                     batch_X = X[i : i + self.batch_size].to(self.device)
                     batch_y = y[i : i + self.batch_size].long().to(self.device)
                     
+                    # 🚀 Phase 11: Feature Sanitization
+                    batch_X = torch.nan_to_num(batch_X)
+                    
                     self.optimizer.zero_grad()
-                    ctx = torch.zeros(len(batch_X), self.coord_hidden).to(self.device)
-                    x_dict = {"M5": batch_X}
-                    logits, _, _, _ = self.model(x_dict, ctx)
+                    x_dict = self._simulate_timeframes(batch_X)
                     
-                    mapped_y = torch.ones_like(batch_y).to(self.device)
-                    mapped_y[batch_y == 1] = 1
-                    mapped_y[batch_y == 0] = 2
+                    with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
+                        logits, worker_logits, _, _ = self.model(x_dict)
+                        
+                        # 🚀 Phase 11: Golden Dataset Labels (0: Long, 1: Short, 2: Neutral)
+                        # SwarmLoss now handles the 3-class target directly.
+                        loss_dict = self.criterion(logits, worker_logits, batch_y)
+                        loss = loss_dict["total"]
+
+                    if torch.isnan(loss):
+                        # Don't fail the whole epoch, just skip this noisy batch
+                        continue
+
+                    self.scaler.scale(loss).backward()
                     
-                    loss = self.criterion(logits, mapped_y)
-                    loss.backward()
-                    self.optimizer.step()
+                    # 🚀 Phase 11: Gradient Clipping
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    
+                    # 🚀 Phase 11: Multi-Class Metrics (Accuracy, Precision)
+                    from sklearn.metrics import accuracy_score, precision_score
+                    with torch.no_grad():
+                        preds = logits.argmax(dim=-1).cpu().numpy()
+                        true_y = batch_y.cpu().numpy()
+                        acc = accuracy_score(true_y, preds)
+                        # We use macro precision to avoid bias if classes are imbalanced
+                        prec = precision_score(true_y, preds, average='macro', zero_division=0)
+                    
                     epoch_loss += loss.item()
                     epoch_batches += 1
                     total_batches += 1
@@ -271,7 +364,15 @@ class ContinuousLearner:
                     # Report every 25 batches for UI telemetry
                     if callback and epoch_batches % 25 == 0:
                         progress = int((epoch_batches / num_batches_in_shard) * 100)
-                        callback(f"Epoch {epoch+1}/{self.epochs} | Batch {epoch_batches}/{num_batches_in_shard} | Loss: {loss.item():.4f} | {progress}%")
+                        sw_weights = [f"{w:.2f}" for w in loss_dict["weights"]]
+                        
+                        # Expert "Thoughts" Insight
+                        # M5, M15, M30, H1, H4
+                        exp_votes = worker_logits.argmax(dim=-1).cpu().numpy()[0] # Take first batch sample
+                        v_map = {0: "L", 1: "S", 2: "W"}
+                        thought_str = "-".join([v_map[v] for v in exp_votes])
+                        
+                        callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | Swarm: {thought_str} | W: {sw_weights} | {progress}%")
                 
                 shard_count += 1
 
