@@ -146,6 +146,12 @@ class TrinityEngine:
         # Thread control
         self.lfm_thread: Optional[threading.Thread] = None
         self.active = False
+        
+    def pre_warm(self, candles: List[dict]):
+        """Inject historical candles into the engine's buffer without triggering ML inference or executions."""
+        for c in candles:
+            self.buffer.add_candle(c)
+        logger.info(f"⚙️ TrinityEngine pre-warmed with {len(candles)} historical candles.")
 
     @classmethod
     def from_checkpoint(cls, config: Optional[EngineConfig] = None) -> "TrinityEngine":

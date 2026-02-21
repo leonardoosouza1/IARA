@@ -132,6 +132,9 @@ class SwarmCoordinator(nn.Module):
             hidden_dim=config.hidden_dim
         )
         
+        # Phase 5 (The Dojo): Macro Fusion Layer
+        self.macro_fusion = nn.Linear(config.hidden_dim + (config.hidden_dim // 4), config.hidden_dim)
+        
         # CfC refinement
         self.cfc = CfCCell(
             input_dim=config.hidden_dim,
@@ -180,7 +183,14 @@ class SwarmCoordinator(nn.Module):
         context_seq = context.unsqueeze(1)
         _, h_refined = self.cfc(context_seq, dt, hx)
         
-        # 3. Expert heads
+        # 3. Macro Fusion (Fuse micro execution with macro trend)
+        if hasattr(self, 'macro_bias') and self.macro_bias is not None:
+            # macro_bias is injected from SwarmBrain [B, Dim]
+            # h_refined is the hidden state [B, hidden_dim]
+            h_refined = self.macro_fusion(torch.cat([h_refined, self.macro_bias], dim=-1))
+            h_refined = F.silu(h_refined)
+            
+        # 4. Expert heads
         long_score = self.long_expert(h_refined)
         short_score = self.short_expert(h_refined)
         
@@ -217,6 +227,13 @@ class SwarmBrain(nn.Module):
         self.worker_config = worker_config
         self.coordinator_config = coordinator_config
         
+        # Phase 5 (The Dojo): Macro Context Encoder (Processa candles de H1)
+        self.macro_encoder = nn.Sequential(
+            nn.Linear(worker_config.input_dim, worker_config.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(worker_config.hidden_dim, coordinator_config.hidden_dim // 4) 
+        )
+        
         self.swarm = WorkerSwarm(worker_config)
         self.coordinator = SwarmCoordinator(coordinator_config)
         
@@ -225,6 +242,17 @@ class SwarmBrain(nn.Module):
         x_dict: dict,
         hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # 0. Process Macro Context (if provided, else dummy)
+        # H1 is typically present in training (from _simulate_timeframes)
+        # In live inference, we'll need to pass it explicitly in x_dict
+        x_macro_h1 = x_dict.get("H1")
+        if x_macro_h1 is not None and len(x_macro_h1.shape) == 3:
+            macro_feat = self.macro_encoder(x_macro_h1) # [B, L, Dim]
+            # Global macro state (average over the H1 sequence)
+            self.coordinator.macro_bias = macro_feat.mean(dim=1) # [B, Dim]
+        else:
+            self.coordinator.macro_bias = None
+
         # 1. Process through worker swarm
         embeddings, worker_logits, _ = self.swarm(x_dict)
         

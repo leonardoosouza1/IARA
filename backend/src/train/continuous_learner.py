@@ -55,7 +55,7 @@ class ContinuousLearner:
         self.worker_hidden = 64 # Matches Golden active_model.pth
         self.coord_hidden = 256 # Matches Golden active_model.pth
         self.seq_len = 128
-        self.input_dim = 14 # Grown from 12 to 14 (Added ATR and Volume VMA)
+        self.input_dim = 26 # v11.0 Dojo (22 indicators + CVD + OI)
         
         # Hyperparameters (Gladiator v9.7 Presets)
         self.epochs = 5
@@ -64,6 +64,12 @@ class ContinuousLearner:
         
         self.model = self._load_model()
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
+        
+        # 🚀 Phase 14: Learning Rate Scheduler & Trauma Buffer
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=2)
+        self.trauma_buffer_X = []
+        self.trauma_buffer_Y = []
+        self.trauma_threshold = 2.5 # Minimum loss to be considered a 'Trauma'
         
         # 🚀 Phase 11: SwarmLoss with Dynamic Weighting
         self.criterion = SwarmLoss(alpha=0.75, gamma=2.0, consensus_weight=0.1).to(self.device)
@@ -182,6 +188,9 @@ class ContinuousLearner:
                         padding = torch.zeros(features.shape[0], features.shape[1], self.input_dim - features.shape[-1], dtype=features.dtype, device=features.device)
                         features = torch.cat([features, padding], dim=-1)
                     
+                # 🚀 Phase 11: Feature Sanitization
+                features = torch.nan_to_num(features)
+                    
                 X.append(features.to(self.device))
                 Y.append(target_scalar)
             except Exception as e:
@@ -220,6 +229,63 @@ class ContinuousLearner:
         x_dict["H4"] = x[:, ::16, :] # Truncated to avoid too small sequences in test
         
         return x_dict
+
+    def _add_to_trauma_buffer(self, x: torch.Tensor, y: torch.Tensor):
+        """Phase 14: Experience Replay. Stores High-Loss batches for focused retraining."""
+        # Only store a reasonable amount to prevent RAM overflow
+        MAX_TRAUMA = 5000
+        for i in range(len(x)):
+            self.trauma_buffer_X.append(x[i].cpu()) # Store on CPU
+            self.trauma_buffer_Y.append(y[i].cpu())
+        
+        if len(self.trauma_buffer_X) > MAX_TRAUMA:
+            # Keep the newest traumas
+            self.trauma_buffer_X = self.trauma_buffer_X[-MAX_TRAUMA:]
+            self.trauma_buffer_Y = self.trauma_buffer_Y[-MAX_TRAUMA:]
+
+    def _train_trauma_replay(self, callback=None):
+        """Forces the model to retrain exclusively on the Trauma Buffer."""
+        if not self.trauma_buffer_X:
+            return
+            
+        if callback: callback(f"🧠 Initiating Trauma Replay... Retraining on {len(self.trauma_buffer_X)} severe mistakes.")
+        self.model.train()
+        
+        X = torch.stack(self.trauma_buffer_X)
+        Y = torch.stack(self.trauma_buffer_Y)
+        
+        total_loss = 0.0
+        batches = 0
+        for i in range(0, len(X), self.batch_size):
+            batch_X = X[i:i+self.batch_size].to(self.device)
+            batch_y = Y[i:i+self.batch_size].to(self.device)
+            
+            self.optimizer.zero_grad()
+            x_dict = self._simulate_timeframes(batch_X)
+            
+            with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
+                logits, worker_logits, _, _ = self.model(x_dict)
+                loss_dict = self.criterion(logits, worker_logits, batch_y)
+                loss = loss_dict["total"]
+                
+            if torch.isnan(loss):
+                continue
+                
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) # Stricter clip for trauma
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            
+            total_loss += loss.item()
+            batches += 1
+            
+        if callback and batches > 0:
+            callback(f"✅ Trauma Replay completed. Avg Loss: {total_loss/batches:.4f}")
+        
+        # Clear buffer after processing
+        self.trauma_buffer_X = []
+        self.trauma_buffer_Y = []
 
     def train_and_evaluate(self, callback=None, stop_check=None):
         if callback: callback(f"🖥️ Device: {self.device} | Building dataset from Trade Journal...")
@@ -264,8 +330,25 @@ class ContinuousLearner:
                 if batch_X.shape[1] > self.seq_len:
                     batch_X = batch_X[:, -self.seq_len:, :]
                 
-                self.optimizer.zero_grad()
+                # 🚀 Dojo Warmup: Curriculum Learning Schedule 
+                adv_prob = 0.0 if epoch == 0 else (0.1 if epoch == 1 else 0.3)
                 
+                # 🚀 Phase 13: Adversarial "Prank" Generation
+                is_adversarial = torch.rand(1).item() < adv_prob
+                current_pressure = self.guard.get_pressure()
+                
+                if is_adversarial:
+                    self.challenger.eval()
+                    batch_X_orig = batch_X.clone()
+                    if callback and batch_count % 50 == 0:
+                        callback(f"😈 Professor Sádico: Aplicando modo aleatório (Pressão: {current_pressure:.2f})")
+                    with torch.no_grad():
+                        batch_X, _ = self.challenger(batch_X, pressure=current_pressure, callback=callback if batch_count % 50 == 0 else None)
+                
+                self.optimizer.zero_grad()
+                if is_adversarial:
+                    self.challenger_opt.zero_grad()
+
                 # 🚀 Swarm Implementation: Multi-TF Input
                 x_dict = self._simulate_timeframes(batch_X)
                 
@@ -281,13 +364,35 @@ class ContinuousLearner:
                     if callback: callback(f"⚠️ Warning: NaN detected in Batch {batch_count+1}. Skipping update.")
                     continue
 
+                # Phase 14: Populate Trauma Buffer
+                if loss.item() > self.trauma_threshold:
+                    self._add_to_trauma_buffer(batch_X.detach(), batch_y.detach())
+
+                # 1. Trader Backward
                 self.scaler.scale(loss).backward()
                 
-                # 🚀 Phase 11: Gradient Clipping for Stability
+                # 2. Challenger Backward
+                if is_adversarial:
+                    self.challenger.train()
+                    for p in self.model.parameters(): p.requires_grad = False
+                    batch_X_adv, _ = self.challenger(batch_X_orig, pressure=current_pressure)
+                    x_dict_adv = self._simulate_timeframes(batch_X_adv)
+                    with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
+                        logits_adv, _, _, _ = self.model(x_dict_adv)
+                        loss_adv_dict = self.criterion(logits_adv, worker_logits, batch_y) # worker_logits reuse
+                        challenger_loss = -loss_adv_dict["total"]
+                    self.scaler.scale(challenger_loss).backward()
+                    for p in self.model.parameters(): p.requires_grad = True
+
+                # 3. Step Optimizers
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                 
                 self.scaler.step(self.optimizer)
+                if is_adversarial:
+                    self.scaler.unscale_(self.challenger_opt)
+                    self.scaler.step(self.challenger_opt)
+                
                 self.scaler.update()
                 
                 epoch_loss += loss.item()
@@ -304,6 +409,10 @@ class ContinuousLearner:
                     best_loss = avg_loss
                     best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                     if callback: callback(f"🏆 New best model! Loss: {best_loss:.4f} (Epoch {epoch+1})")
+                
+            # Phase 14: Execute Trauma Replay
+            if len(self.trauma_buffer_X) > 0:
+                self._train_trauma_replay(callback)
 
         # Restore and save the best model weights
         if best_state:
@@ -390,9 +499,11 @@ class ContinuousLearner:
                     # 🚀 Phase 11: Feature Sanitization
                     batch_X = torch.nan_to_num(batch_X)
                     
+                    # 🚀 Dojo Warmup: Curriculum Learning Schedule
+                    adv_prob = 0.0 if epoch == 0 else (0.1 if epoch == 1 else 0.3)
+                    
                     # 🚀 Phase 13: Adversarial "Prank" Generation
-                    # 30% chance to face a 'Prank' from the Challenger
-                    is_adversarial = torch.rand(1).item() < 0.3
+                    is_adversarial = torch.rand(1).item() < adv_prob
                     current_pressure = self.guard.get_pressure()
                     
                     if is_adversarial:
@@ -405,8 +516,8 @@ class ContinuousLearner:
                             callback(f"😈 Professor Sádico: Aplicando modo aleatório (Pressão: {current_pressure:.2f})")
                             
                         with torch.no_grad():
-                            batch_X = self.challenger(batch_X, pressure=current_pressure, callback=callback if epoch_batches % 50 == 0 else None)
-                    
+                            batch_X, _ = self.challenger(batch_X, pressure=current_pressure, callback=callback if epoch_batches % 50 == 0 else None)
+                     
                     self.optimizer.zero_grad()
                     if is_adversarial:
                         self.challenger_opt.zero_grad()
@@ -415,11 +526,17 @@ class ContinuousLearner:
                     
                     with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
                         logits, worker_logits, _, _ = self.model(x_dict)
+                        # Phase 14: Label Smoothing handled inside SwarmLoss (if supported), or we pass smoothed targets
+                        # Currently relying on standard CE. For strict label smoothing, we would need to manually apply it.
                         loss_dict = self.criterion(logits, worker_logits, batch_y)
                         loss = loss_dict["total"]
 
                     if torch.isnan(loss):
                         continue
+
+                    # Phase 14: Populate Trauma Buffer
+                    if loss.item() > self.trauma_threshold:
+                        self._add_to_trauma_buffer(batch_X.detach(), batch_y.detach())
 
                     # 1. Trader Backward
                     self.scaler.scale(loss).backward()
@@ -429,7 +546,7 @@ class ContinuousLearner:
                         self.challenger.train()
                         for p in self.model.parameters(): p.requires_grad = False
                         
-                        batch_X_adv = self.challenger(batch_X_orig, pressure=current_pressure)
+                        batch_X_adv, _ = self.challenger(batch_X_orig, pressure=current_pressure)
                         x_dict_adv = self._simulate_timeframes(batch_X_adv)
                         
                         with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
@@ -442,7 +559,8 @@ class ContinuousLearner:
 
                     # 3. Step Optimizers
                     self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    # 🚀 Phase 14: Gradient Clipping (Prevent Exploding Gradients during attacks)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                     
                     self.scaler.step(self.optimizer)
                     if is_adversarial:
@@ -452,14 +570,24 @@ class ContinuousLearner:
                     # 4. Final Scaler Update
                     self.scaler.update()
                     
-                    # 🚀 Phase 11: Multi-Class Metrics (Accuracy, Precision)
-                    from sklearn.metrics import accuracy_score, precision_score
+                    # 🚀 Phase 11 & 14: Multi-Class Metrics (Accuracy, Precision, AUC, F1)
+                    from sklearn.metrics import accuracy_score, precision_score, f1_score, roc_auc_score
                     with torch.no_grad():
-                        preds = logits.argmax(dim=-1).cpu().numpy()
+                        logits_np = logits.detach().cpu().numpy()
+                        preds = logits_np.argmax(axis=-1)
                         true_y = batch_y.cpu().numpy()
+                        
                         acc = accuracy_score(true_y, preds)
-                        # We use macro precision to avoid bias if classes are imbalanced
                         prec = precision_score(true_y, preds, average='macro', zero_division=0)
+                        f1 = f1_score(true_y, preds, average='macro', zero_division=0)
+                        
+                        # AUC requires probabilities
+                        probs = torch.softmax(logits.detach(), dim=-1).cpu().numpy()
+                        try:
+                            # OVR (One-vs-Rest) AUC for multi-class
+                            auc = roc_auc_score(true_y, probs, multi_class='ovr', average='macro')
+                        except Exception:
+                            auc = 0.5 # Default for early training / single class batches
                     
                     epoch_loss += loss.item()
                     epoch_batches += 1
@@ -476,7 +604,7 @@ class ContinuousLearner:
                         v_map = {0: "L", 1: "S", 2: "W"}
                         thought_str = "-".join([v_map[v] for v in exp_votes])
                         
-                        callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | Swarm: {thought_str} | W: {sw_weights} | {progress}%")
+                        callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | {progress}%")
                 
                 shard_count += 1
                 
@@ -519,14 +647,26 @@ class ContinuousLearner:
                         v_loss_dict = self.criterion(v_logits, v_worker_logits, v_y)
                         val_loss += v_loss_dict["total"].item()
                         val_batches += 1
-                
+                            
                 if val_batches > 0:
                     avg_val_loss = val_loss / val_batches
-                    avg_train_loss = epoch_loss / epoch_batches
-                    self.guard.update(avg_train_loss, avg_val_loss)
-                    pressure = self.guard.get_pressure()
-                    if callback: callback(f"🛡️ Guard: Precision-Recall Check | Pressure: {pressure:.2f} | Val Loss: {avg_val_loss:.4f}")
+                    if epoch_batches > 0:
+                        avg_train_loss = epoch_loss / epoch_batches 
+                        self.guard.update(avg_train_loss, avg_val_loss)
+                    
+                    if callback: callback(f"📉 Validation Loss vs Professor Sádico: {avg_val_loss:.4f}")
+                        
+                    # Phase 14: ReduceLROnPlateau
+                    self.scheduler.step(avg_val_loss)
+                        
+                    current_lr = self.optimizer.param_groups[0]['lr']
+                    if callback and epoch > 0:
+                        callback(f"🔧 Learning Rate: {current_lr:.6f} | Challenger Pressure: {self.guard.get_pressure():.2f}")
 
+            # Phase 14: Execute Trauma Replay at the end of every epoch if accumulated
+            if len(self.trauma_buffer_X) > 0:
+                self._train_trauma_replay(callback)
+            
             if epoch_batches > 0:
                 avg_epoch_loss = epoch_loss / epoch_batches
                 if callback: callback(f"✅ Epoch {epoch+1} Complete | Avg Loss: {avg_epoch_loss:.4f}")
@@ -535,7 +675,7 @@ class ContinuousLearner:
                 if avg_epoch_loss < best_loss:
                     best_loss = avg_epoch_loss
                     best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-                    if callback: callback(f"🏆 New best model! Loss: {best_loss:.4f} (Epoch {epoch+1})")
+                    if callback: callback(f"🏆 New best model (Dataset)! Loss: {best_loss:.4f} (Epoch {epoch+1})")
 
         # Restore and save the best model weights
         if best_state:

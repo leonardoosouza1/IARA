@@ -25,7 +25,7 @@ from sqlalchemy.future import select
 # Alpaca Data API
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest, CryptoLatestTradeRequest, StockBarsRequest, StockLatestTradeRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from src.api.sensory_hub import AlpacaSensoryHub
 
@@ -85,12 +85,15 @@ class MarketDataService:
                 for a in agents:
                     self.symbols.append(a.symbol)
                     try:
-                        fleet_manager.start_agent(
+                        agent_id = fleet_manager.start_agent(
                             symbol=a.symbol,
                             market_type=a.market_type,
                             model_name=a.model_version,
                             execution_venue="ALPACA",
                         )
+                        engine = fleet_manager.engines.get(agent_id)
+                        if engine:
+                            await self._pre_warm_engine(a.symbol, engine)
                     except Exception as e:
                         logger.error(f"Failed to auto-start agent for {a.symbol}: {e}")
                 
@@ -98,6 +101,41 @@ class MarketDataService:
                     logger.info("No active agents found in DB. Waiting for UI configuration.")
         except Exception as e:
             logger.error(f"Error querying active agents: {e}")
+
+    async def _pre_warm_engine(self, symbol: str, engine):
+        """Fetch 48h of 5m bars and instantly fill the TrinityEngine buffer."""
+        if not self.crypto_client:
+            logger.warning(f"No Alpaca client. Skipping pre-warm for {symbol}.")
+            return
+
+        try:
+            logger.info(f"🔥 Pre-warming engine for {symbol} with 48h of 5m historical data...")
+            req = CryptoBarsRequest(
+                symbol_or_symbols=[symbol],
+                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                start=datetime.now() - timedelta(hours=48),
+            )
+            bars = self.crypto_client.get_crypto_bars(req)
+            
+            if symbol in bars.df.index.get_level_values(0):
+                df = bars.df.loc[symbol]
+                candles = []
+                for index, row in df.iterrows():
+                    candles.append({
+                        "time": int(index.timestamp()),
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": float(row["volume"])
+                    })
+                
+                if candles:
+                    engine.pre_warm(candles)
+            else:
+                logger.warning(f"No historical data found for {symbol} pre-warming.")
+        except Exception as e:
+            logger.error(f"Pre-warming failed for {symbol}: {e}")
 
     async def _fetch_price(self, symbol: str) -> Optional[float]:
         """Fetch latest price from Alpaca."""
@@ -241,6 +279,19 @@ class MarketDataService:
             try:
                 tasks = []
                 now_ts = time.time()
+                
+                # Check for dynamically added agents
+                current_fleet_symbols = [cfg.symbol for cfg in fleet_manager.configs.values()]
+                for sym in current_fleet_symbols:
+                    if sym not in self.symbols:
+                        self.symbols.append(sym)
+                        self.candle_start[sym] = now_ts
+                        self._last_emit[sym] = 0.0
+                        logger.info(f"MarketDataService picked up new symbol: {sym}")
+                        agent_id = f"agent-{sym.lower().replace('/', '-')}"
+                        engine = fleet_manager.engines.get(agent_id)
+                        if engine:
+                            await self._pre_warm_engine(sym, engine)
                 
                 for symbol in self.symbols:
                     # 1. Get Price (Real or Simulated)

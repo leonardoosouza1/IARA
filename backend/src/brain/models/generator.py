@@ -26,10 +26,16 @@ class ChallengerGenerator(nn.Module):
       - Neural Prank: Learned adversarial noise (v9.0)
     """
     
-    def __init__(self, input_dim: int = 12, hidden_dim: int = 64):
+    def __init__(self, input_dim: int = 12, hidden_dim: int = 64, num_arms: int = 4):
         super().__init__()
         
         self.input_dim = input_dim
+        self.num_arms = num_arms
+        
+        # RL / Multi-Armed Bandit State
+        self.register_buffer("arm_counts", torch.ones(num_arms)) # Inicia com 1 para exploração
+        self.register_buffer("arm_rewards", torch.zeros(num_arms)) # Recompensa: aumento da Loss do Trader
+        self.exploration_c = 2.0 # UCB Exploration parameter
         
         # Neural Backbone (for learned pranks)
         self.encoder = nn.Sequential(
@@ -48,7 +54,19 @@ class ChallengerGenerator(nn.Module):
         
         self.pressure_scaler = nn.Parameter(torch.tensor(0.01)) 
         
-    def _apply_stop_hunt(self, x: torch.Tensor, pressure: float) -> torch.Tensor:
+    def _select_attack_mode(self) -> int:
+        """UCB (Upper Confidence Bound) Arm Selection"""
+        total_counts = self.arm_counts.sum()
+        q_values = self.arm_rewards / self.arm_counts
+        ucb_values = q_values + self.exploration_c * torch.sqrt(torch.log(total_counts) / self.arm_counts)
+        return torch.argmax(ucb_values).item()
+
+    def update_reward(self, arm: int, trader_loss_increase: float):
+        """Called by ContinuousLearner after the Trader's forward pass"""
+        self.arm_counts[arm] += 1
+        self.arm_rewards[arm] += trader_loss_increase
+        
+    def _apply_stop_hunt(self, x: torch.Tensor, max_perturbation: torch.Tensor) -> torch.Tensor:
         """
         Simulates Stop Hunt (Violinada).
         Push price (Wick) past support/resistance and then snap back.
@@ -67,21 +85,21 @@ class ChallengerGenerator(nn.Module):
                 t = torch.randint(seq_len // 2, seq_len - 1, (1,)).item()
                 direction = 1 if torch.rand(1).item() > 0.5 else -1
                 
-                # Intensidade baseada em ATR e alpha (pressão)
-                intensidade = pressure * 2.0 
+                # Intensidade baseada no cap (max_perturbation) do timestep atual
+                intensidade = max_perturbation[b, t].item() * 2.0 
                 
                 # BB %B (idx 5) - Pura quebra de banda
                 x_pranked[b, t, 5] += direction * intensidade
                 
                 # ATR (idx 6) - Volatilidade explode no hunt
-                x_pranked[b, t, 6] *= (1.0 + 0.5 * pressure)
+                x_pranked[b, t, 6] *= (1.0 + 0.5 * max_perturbation[b, t].item())
                 
                 # Velocity (idx 9) - O movimento é rápido
                 x_pranked[b, t, 9] += direction * intensidade * 3.0
                 
         return x_pranked
 
-    def _apply_liquidation_cascade(self, x: torch.Tensor, pressure: float) -> torch.Tensor:
+    def _apply_liquidation_cascade(self, x: torch.Tensor, max_perturbation: torch.Tensor) -> torch.Tensor:
         """
         Simulates Efeito Dominó.
         High volume drops in a short period.
@@ -96,7 +114,7 @@ class ChallengerGenerator(nn.Module):
             
             for t in range(start_t, seq_len):
                 decay = (t - start_t + 1)
-                drop_force = pressure * decay * 0.2
+                drop_force = max_perturbation[b, t].item() * decay * 0.2
                 
                 # Sentiment (idx 11) - Panico
                 x_pranked[b, t, 11] -= drop_force
@@ -105,22 +123,23 @@ class ChallengerGenerator(nn.Module):
                 x_pranked[b, t, 9] -= drop_force * 2.0
                 
                 # ATR (idx 6) - Panico gera volatilidade
-                x_pranked[b, t, 6] *= (1.0 + 0.1 * pressure * decay)
+                x_pranked[b, t, 6] *= (1.0 + 0.1 * max_perturbation[b, t].item() * decay)
                 
         return x_pranked
 
-    def _apply_choppy_market(self, x: torch.Tensor, pressure: float) -> torch.Tensor:
+    def _apply_choppy_market(self, x: torch.Tensor, max_perturbation: torch.Tensor) -> torch.Tensor:
         """
         Simulates Choppy Market (Ruído Lateral).
         Flatten indicators and add high-frequency noise.
         """
         # Diminue a variância dos indicadores (tendendo ao neutro/lateral)
-        # 1.0 - pressure * 0.1 (clamped)
-        factor = torch.clamp(torch.tensor(1.0 - pressure * 0.1), 0.1, 1.0)
+        # 1.0 - pressure * 0.1 (clamped) using max_perturbation mean roughly
+        pressure_proxy = max_perturbation.mean()
+        factor = torch.clamp(torch.tensor(1.0 - pressure_proxy * 0.1), 0.1, 1.0).to(x.device)
         x_pranked = x * factor
         
-        # Adiciona ruído jitter de alta frequência
-        noise = torch.randn_like(x) * (0.05 * pressure)
+        # Adiciona ruído jitter de alta frequência limitado pelo ATR gap
+        noise = torch.randn_like(x) * max_perturbation.unsqueeze(-1)
         return x_pranked + noise
 
     def forward(
@@ -128,31 +147,45 @@ class ChallengerGenerator(nn.Module):
         x: torch.Tensor, 
         pressure: float = 1.0,
         callback: Optional[callable] = None
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, int]:
         """
         Selection logic for the "Professor Sádico".
+        Uses UCB Multi-Armed Bandit to exploit model weaknesses.
         """
-        roll = torch.rand(1).item()
+        mode = self._select_attack_mode()
         
-        # 25% Stop Hunt, 25% Cascade, 25% Choppy, 25% Neural
-        if roll < 0.25:
+        # ATR Epsilon Cap (Realism Bound)
+        # Assuming ATR is idx 6 (or proxy pressure if missing)
+        batch_size, seq_len, dim = x.size()
+        if dim > 6:
+            atr_tensor = torch.abs(x[:, :, 6]) 
+            max_perturbation = atr_tensor * 0.5 * pressure
+        else:
+            max_perturbation = torch.full((batch_size, seq_len), 0.1 * pressure, device=x.device)
+            
+        # Add tiny floor to ensure some perturbation happens even in flat markets
+        max_perturbation = torch.clamp(max_perturbation, min=0.01)
+        
+        if mode == 0:
             if callback: callback("😈 Professor Sádico: Simulando Stop Hunt (Wick/Violinada)...")
-            return self._apply_stop_hunt(x, pressure)
-        elif roll < 0.50:
+            return self._apply_stop_hunt(x, max_perturbation), mode
+        elif mode == 1:
             if callback: callback("😈 Professor Sádico: Simulando Liquidation Cascade (Efeito Dominó)...")
-            return self._apply_liquidation_cascade(x, pressure)
-        elif roll < 0.75:
+            return self._apply_liquidation_cascade(x, max_perturbation), mode
+        elif mode == 2:
             if callback: callback("😈 Professor Sádico: Injetando Ruído Lateral (Choppy Market)...")
-            return self._apply_choppy_market(x, pressure)
+            return self._apply_choppy_market(x, max_perturbation), mode
         else:
             if callback: callback("😈 Professor Sádico: Aplicando Neural Prank (Adversarial Noise)...")
             # Traditional Neural Prank
-            batch_size, seq_len, _ = x.size()
             x_flat = x.view(-1, self.input_dim)
             features = self.encoder(x_flat)
             delta = self.noise_head(features)
             delta = delta.view(batch_size, seq_len, self.input_dim)
-            return x + (delta * self.pressure_scaler * pressure)
+            
+            # Use max_perturbation to cap neural noise
+            delta_capped = torch.clamp(delta, min=-1.0, max=1.0) * max_perturbation.unsqueeze(-1)
+            return x + (delta_capped * self.pressure_scaler), mode
 
 class OverfittingGuard(nn.Module):
     """

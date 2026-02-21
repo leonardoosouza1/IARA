@@ -30,10 +30,13 @@ training_state = {
     "last_loss": None,
     "last_acc": None,
     "last_prec": None,
+    "last_auc": None,
+    "last_f1": None,
     "pressure": 1.0,
     "last_run": None,
     "message": "Idle",
     "progress": 0,  # 0 to 100
+    "trauma_count": 0,
     "logs": [],     # Recent training logs
     "all_logs": [], # Full history for export
     "stop_requested": False,
@@ -100,9 +103,21 @@ def run_training_background(protocol: Dict[str, Any]):
             if prec_match:
                 training_state["last_prec"] = float(prec_match.group(1))
 
+            auc_match = re.search(r'AUC:\s*([\d.]+)', msg)
+            if auc_match:
+                training_state["last_auc"] = float(auc_match.group(1))
+
+            f1_match = re.search(r'F1:\s*([\d.]+)', msg)
+            if f1_match:
+                training_state["last_f1"] = float(f1_match.group(1))
+
             pressure_match = re.search(r'Pressure:\s*([\d.]+)', msg)
             if pressure_match:
                 training_state["pressure"] = float(pressure_match.group(1))
+
+            trauma_match = re.search(r'Retraining on (\d+) severe mistakes', msg)
+            if trauma_match:
+                training_state["trauma_count"] = int(trauma_match.group(1))
 
             # Store in history if it's a metric update
             if loss_match:
@@ -111,6 +126,8 @@ def run_training_background(protocol: Dict[str, Any]):
                     "loss": training_state["last_loss"],
                     "acc": training_state["last_acc"] or 0,
                     "prec": training_state["last_prec"] or 0,
+                    "auc": training_state.get("last_auc", 0),
+                    "f1": training_state.get("last_f1", 0),
                     "pressure": training_state.get("pressure", 1.0)
                 })
                 # Keep last 50 points to prevent memory leak
