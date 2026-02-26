@@ -36,7 +36,7 @@ from src.trading.signal_generator import SignalEngine, TradeSignal
 
 # Tools
 from src.brain.tools.market_scanner import MarketScanner
-from src.brain.tools.alpaca_executor import AlpacaExecutor
+from src.brain.tools.binance_executor import BinanceExecutor
 from src.brain.agents.sentinel_stub import SentinelStub
 
 logger = logging.getLogger("TrinityEngine")
@@ -52,9 +52,9 @@ class EngineConfig:
     
     # Trading
     symbol: str = "BTC/USD"
-    alpaca_symbol: str = "BTC/USD"
+    binance_symbol: str = "BTCUSDT"
     market_type: str = "crypto" # "crypto" or "stock"
-    execution_venue: str = "ALPACA" # "ALPACA" or "BINANCE"
+    execution_venue: str = "BINANCE"
     trade_qty: float = 0.01
     
     # Model
@@ -134,14 +134,9 @@ class TrinityEngine:
         self.sentinel = SentinelStub()
         self.scanner = MarketScanner()
         
-        # Select Executor
-        if config.execution_venue == "BINANCE" and config.market_type == "crypto":
-             self.executor = CCXTExecutor(exchange_id="binance")
-             logger.info(f"🔌 Using CCXT Executor (Binance) for {config.symbol}")
-        else:
-             # Default to Alpaca (Stocks or Crypto Paper)
-             self.executor = AlpacaExecutor()
-             logger.info(f"🦙 Using Alpaca Executor for {config.symbol} (Venue: {config.execution_venue})")
+        # Executor
+        self.executor = BinanceExecutor(symbol=config.symbol)
+        logger.info(f"🔌 Using Binance Executor for {config.symbol} | Mode: {self.executor.mode}")
 
         # Thread control
         self.lfm_thread: Optional[threading.Thread] = None
@@ -243,10 +238,10 @@ class TrinityEngine:
                 f"🚀 [SNIPER] LONG ({signal.confidence:.2f}) | "
                 f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait}"
             )
-            order = self.executor.place_market_order(
-                self.config.symbol, self.config.trade_qty, "BUY"
+            order = self.executor.execute_signal(
+                action="BUY", confidence=signal.confidence, current_price=current_price, qty=self.config.trade_qty
             )
-            if order:
+            if order and order.get("status") != "aborted":
                 await self._persist_trade(order, signal, "BUY", current_price)
 
         elif signal.direction == "SHORT" and signal.confidence > 0.82:
@@ -254,10 +249,10 @@ class TrinityEngine:
                 f"🔻 [SNIPER] SHORT ({signal.confidence:.2f}) | "
                 f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait}"
             )
-            order = self.executor.place_market_order(
-                self.config.symbol, self.config.trade_qty, "SELL"
+            order = self.executor.execute_signal(
+                action="SELL", confidence=signal.confidence, current_price=current_price, qty=self.config.trade_qty
             )
-            if order:
+            if order and order.get("status") != "aborted":
                 await self._persist_trade(order, signal, "SELL", current_price)
 
         return signal
@@ -295,17 +290,22 @@ class TrinityEngine:
         from src.database.core import AsyncSessionLocal
         from src.database.models import Trade
         
-        # Parse order object (CCXT vs Alpaca)
-        # CCXT returns dict, Alpaca returns object or dict depending on usage
+        # Parse order object (Binance native)
         order_id = "unknown"
         exec_price = price
         
-        if isinstance(order, dict): # CCXT
-            order_id = str(order.get('id', 'unknown'))
-            # CCXT market orders might not have price immediately if async, but we have 'average' or current price
-            exec_price = float(order.get('average') or price)
-        else: # Alpaca Object
-            order_id = str(getattr(order, 'id', 'unknown'))
+        if isinstance(order, dict):
+            order_id = str(order.get('orderId', 'unknown'))
+            # Calculate average execution price if available
+            fills = order.get("fills", [])
+            if fills:
+                try:
+                    total_cost = sum(float(f["price"]) * float(f["qty"]) for f in fills)
+                    total_qty = sum(float(f["qty"]) for f in fills)
+                    if total_qty > 0:
+                        exec_price = total_cost / total_qty
+                except Exception:
+                    pass
         
         try:
              async with AsyncSessionLocal() as session:

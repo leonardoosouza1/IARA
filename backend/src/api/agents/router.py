@@ -23,7 +23,7 @@ class AgentCreate(BaseModel):
     id: str
     symbol: str
     market_type: str
-    model_version: str = "active_model.pth"
+    model_version: str = "active_model_v10.pth"
     
 class AgentResponse(BaseModel):
     id: str

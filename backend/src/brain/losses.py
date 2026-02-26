@@ -71,6 +71,7 @@ class AsymmetricFocalLoss(nn.Module):
         
         # Probability of correct class
         pt = torch.exp(-bce_loss)
+        pt = torch.clamp(pt, min=1e-7, max=1.0 - 1e-7)
         
         # Focal term: (1 - pt)^gamma
         focal_term = (1 - pt) ** self.gamma
@@ -234,6 +235,7 @@ class AsymmetricCrossEntropyLoss(nn.Module):
             self.weights = self.weights.to(logits.device)
             
         # reduction='none' so we can apply optional sample weights
+        # epsilon padding added intrinsically by cross_entropy via Softmax
         loss = F.cross_entropy(logits, targets.long(), weight=self.weights, label_smoothing=self.label_smoothing, reduction='none')
         
         if weight is not None:

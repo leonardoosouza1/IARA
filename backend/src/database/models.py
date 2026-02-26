@@ -70,7 +70,7 @@ class AgentProfile(Base):
     id = Column(String, primary_key=True, index=True) # e.g. "agent-btc-usd"
     symbol = Column(String, nullable=False) # e.g. "BTC/USD"
     market_type = Column(String, nullable=False) # "crypto" or "forex"
-    model_version = Column(String, default="active_model.pth")
+    model_version = Column(String, default="active_model_v10.pth")
     is_active = Column(Boolean, default=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

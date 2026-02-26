@@ -21,6 +21,7 @@ import {
   Trash,
   Star,
   Square,
+  BarChart3,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
@@ -58,7 +59,20 @@ interface TrainingStatus {
   progress: number;
   logs: string[];
   history?: MetricPoint[];
+  epoch_history?: EpochHistoryEntry[];
   micro_state?: MicroState;
+}
+
+interface EpochHistoryEntry {
+  epoch: number;
+  loss: number;
+  acc: number;
+  prec: number;
+  auc: number;
+  f1: number;
+  trauma_size: number;
+  mastered: number;
+  lr: number;
 }
 
 interface DataStatus {
@@ -1203,6 +1217,113 @@ export default function BrainLabPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* 📊 Epoch Comparison Dashboard */}
+      {trainingStatus?.epoch_history &&
+        trainingStatus.epoch_history.length > 0 && (
+          <Card className="bg-zinc-900/30 border-zinc-800/60 backdrop-blur-sm mt-6 mb-6">
+            <CardHeader className="border-b border-zinc-800/60 py-3">
+              <div className="flex justify-between items-center">
+                <CardTitle className="text-sm font-bold text-zinc-300 flex items-center gap-2">
+                  <BarChart3 className="h-4 w-4 text-indigo-400" />
+                  Epoch Comparison Dashboard
+                </CardTitle>
+                <Badge className="bg-indigo-500/20 text-indigo-400 border-none text-[10px]">
+                  {trainingStatus.epoch_history.length} Epochs Completed
+                </Badge>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0 overflow-x-auto">
+              <table className="w-full text-[11px] text-left">
+                <thead className="text-zinc-500 uppercase bg-zinc-950/50">
+                  <tr>
+                    <th className="px-4 py-2 font-bold hidden sm:table-cell">
+                      Epoch
+                    </th>
+                    <th className="px-4 py-2 font-bold sm:hidden">Ep</th>
+                    <th className="px-4 py-2 font-bold">Loss</th>
+                    <th className="px-4 py-2 font-bold">Acc</th>
+                    <th className="px-4 py-2 font-bold">Prec</th>
+                    <th className="px-4 py-2 font-bold">AUC</th>
+                    <th className="px-4 py-2 font-bold">F1</th>
+                    <th className="px-4 py-2 font-bold hidden md:table-cell">
+                      Trauma Buffer
+                    </th>
+                    <th className="px-4 py-2 font-bold hidden sm:table-cell">
+                      Mastered
+                    </th>
+                    <th className="px-4 py-2 font-bold hidden lg:table-cell">
+                      Learn Rate
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/40 font-mono">
+                  {trainingStatus.epoch_history.map((entry, idx) => {
+                    const prev =
+                      idx > 0 ? trainingStatus.epoch_history![idx - 1] : null;
+
+                    const renderTrend = (
+                      metric: keyof EpochHistoryEntry,
+                      current: number,
+                      inverse = false,
+                    ) => {
+                      if (!prev) return "";
+                      const diff = current - (prev[metric] as number);
+                      if (Math.abs(diff) < 0.005)
+                        return <span className="text-zinc-600 ml-1">→</span>;
+                      const isGood = inverse ? diff < 0 : diff > 0;
+                      return isGood ? (
+                        <span className="text-emerald-500 ml-1">↑</span>
+                      ) : (
+                        <span className="text-rose-500 ml-1">↓</span>
+                      );
+                    };
+
+                    return (
+                      <tr
+                        key={entry.epoch}
+                        className="hover:bg-zinc-800/20 transition-colors"
+                      >
+                        <td className="px-4 py-2 font-bold text-zinc-300">
+                          E{entry.epoch}
+                        </td>
+                        <td className="px-4 py-2 text-indigo-300">
+                          {entry.loss.toFixed(4)}
+                          {renderTrend("loss", entry.loss, true)}
+                        </td>
+                        <td className="px-4 py-2 text-emerald-400">
+                          {entry.acc.toFixed(2)}
+                          {renderTrend("acc", entry.acc)}
+                        </td>
+                        <td className="px-4 py-2 text-violet-400">
+                          {entry.prec.toFixed(2)}
+                          {renderTrend("prec", entry.prec)}
+                        </td>
+                        <td className="px-4 py-2 font-bold text-amber-400">
+                          {entry.auc.toFixed(3)}
+                          {renderTrend("auc", entry.auc)}
+                        </td>
+                        <td className="px-4 py-2 text-cyan-400">
+                          {entry.f1.toFixed(2)}
+                          {renderTrend("f1", entry.f1)}
+                        </td>
+                        <td className="px-4 py-2 text-rose-400/80 hidden md:table-cell">
+                          {entry.trauma_size.toLocaleString()}
+                        </td>
+                        <td className="px-4 py-2 text-emerald-500 font-bold hidden sm:table-cell">
+                          +{entry.mastered.toLocaleString()}
+                        </td>
+                        <td className="px-4 py-2 text-zinc-500 hidden lg:table-cell">
+                          {entry.lr.toFixed(6)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+        )}
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Dataset Manager */}

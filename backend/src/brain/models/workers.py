@@ -96,16 +96,28 @@ class LightningWorker(nn.Module):
         self.config = config
         self.timeframe = timeframe
         
+        # 🌊 Phase 21: Temporal Self-Attention
+        # A projection layer ensures robust Multi-head division regardless of how many features survive the ExtraTrees Pruning
+        attn_dim = 64
+        self.attn_proj = nn.Linear(config.input_dim, attn_dim)
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=attn_dim,
+            num_heads=4,
+            dropout=config.dropout,
+            batch_first=True
+        )
+        self.attn_norm = nn.LayerNorm(attn_dim)
+        
         # Liquid Backbone
         self.cfc = CfCCell(
-            input_dim=config.input_dim,
+            input_dim=attn_dim,
             hidden_dim=config.hidden_dim,
             dropout=config.dropout
         )
         
-        # Residual projection if dims don't match
-        if config.input_dim != config.hidden_dim:
-            self.res_proj = nn.Linear(config.input_dim, config.hidden_dim)
+        # Residual projection from the attended dims to hidden
+        if attn_dim != config.hidden_dim:
+            self.res_proj = nn.Linear(attn_dim, config.hidden_dim)
         else:
             self.res_proj = nn.Identity()
             
@@ -117,12 +129,22 @@ class LightningWorker(nn.Module):
         x: torch.Tensor, 
         dt: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Process through Liquid Backbone
-        _, h_t = self.cfc(x, dt)
         
-        # Residual connection from LAST timestep of input
-        # Map input features to hidden dim
-        residual = self.res_proj(x[:, -1, :])
+        # 1. Base Projection (e.g. 18 pruned dimensions -> 64 embedding dimensions)
+        x_proj = self.attn_proj(x)
+        
+        # 1.5 Pre-LayerNorm (CRITICAL for FP16 Autocast Stability!)
+        x_norm = self.attn_norm(x_proj)
+        
+        # 2. Temporal Self-Attention (Locating crucial wicks/anomalies in the sequence)
+        attn_out, _ = self.self_attn(x_norm, x_norm, x_norm, need_weights=False)
+        x_attn = x_proj + F.dropout(attn_out, p=self.config.dropout, training=self.training)
+        
+        # 3. Process through Liquid Continuous-Time Backbone
+        _, h_t = self.cfc(x_attn, dt)
+        
+        # Residual connection from LAST timestep of the attended sequence
+        residual = self.res_proj(x_attn[:, -1, :])
         
         # Skip connection
         h_t = h_t + residual

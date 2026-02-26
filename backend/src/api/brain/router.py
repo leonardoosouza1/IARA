@@ -42,6 +42,7 @@ training_state = {
     "stop_requested": False,
     "current_epoch": 1,
     "micro_state": {},  # 🧠 Phase 20: Real-time internal brain state for "Opened Brain" dashboard
+    "epoch_history": [],  # 📊 Phase 14 v2: Epoch comparison data for frontend dashboard
 }
 
 # In-memory data fetching status
@@ -49,6 +50,15 @@ data_state = {
     "is_fetching": False,
     "message": "Idle",
     "logs": []
+}
+
+backtest_state = {
+    "is_running": False,
+    "dataset": "",
+    "threshold": 0.5,
+    "message": "Idle",
+    "logs": [],
+    "results": None
 }
 
 class TrainingProtocol(BaseModel):
@@ -79,6 +89,7 @@ def run_training_background(protocol: Dict[str, Any]):
         training_state["history"] = []
         training_state["stop_requested"] = False
         training_state["micro_state"] = {}
+        training_state["epoch_history"] = []
         training_state["message"] = f"Initializing {protocol['mode']} protocol..."
         
         def log_callback(msg: str):
@@ -122,9 +133,36 @@ def run_training_background(protocol: Dict[str, Any]):
             if pressure_match:
                 training_state["pressure"] = float(pressure_match.group(1))
 
-            trauma_match = re.search(r'Retraining on (\d+) severe mistakes', msg)
+            trauma_match = re.search(r'Retraining on (\d+) (?:severe mistakes|persistent memories)', msg)
             if trauma_match:
                 training_state["trauma_count"] = int(trauma_match.group(1))
+            
+            # 📊 Phase 14 v2: Parse epoch comparison rows (E1, E2, etc.)
+            epoch_row_match = re.search(r'E(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(\d+)\s+([\d.]+)', msg)
+            if epoch_row_match:
+                epoch_num = int(epoch_row_match.group(1))
+                epoch_entry = {
+                    "epoch": epoch_num,
+                    "loss": float(epoch_row_match.group(2)),
+                    "acc": float(epoch_row_match.group(3)),
+                    "prec": float(epoch_row_match.group(4)),
+                    "auc": float(epoch_row_match.group(5)),
+                    "f1": float(epoch_row_match.group(6)),
+                    "trauma_size": int(epoch_row_match.group(7)),
+                    "mastered": int(epoch_row_match.group(8)),
+                    "lr": float(epoch_row_match.group(9)),
+                }
+                # Replace existing entry for same epoch or append
+                existing = [i for i, e in enumerate(training_state["epoch_history"]) if e["epoch"] == epoch_num]
+                if existing:
+                    training_state["epoch_history"][existing[0]] = epoch_entry
+                else:
+                    training_state["epoch_history"].append(epoch_entry)
+            
+            # Parse trend line
+            trend_match = re.search(r'Tend[êe]ncia:\s*(.+)', msg)
+            if trend_match:
+                training_state["epoch_trend"] = trend_match.group(1).strip()
 
             # Store in history if it's a metric update
             if loss_match:
@@ -268,6 +306,56 @@ async def trigger_data_fetch(request: FetchRequest):
     request_dict = request.dict()
     threading.Thread(target=run_data_fetch_background, args=(request_dict,)).start()
     return {"message": "Data fetch initiated", "status": data_state}
+
+class BacktestRequest(BaseModel):
+    dataset: str = "BTCUSD"
+    threshold: float = 0.50
+
+def run_backtest_background(request: Dict[str, Any]):
+    global backtest_state
+    try:
+        backtest_state["is_running"] = True
+        backtest_state["dataset"] = request["dataset"]
+        backtest_state["threshold"] = request["threshold"]
+        backtest_state["logs"] = []
+        backtest_state["results"] = None
+        
+        def log_cb(msg: str):
+            backtest_state["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            if len(backtest_state["logs"]) > 100:
+                backtest_state["logs"].pop(0)
+            backtest_state["message"] = msg
+
+        from src.train.backtester import Backtester
+        bt = Backtester(model_path="logs/models/active_model_v10.pth")
+        
+        results = bt.evaluate_shards(
+            dataset_name=request["dataset"],
+            sniper_threshold=request["threshold"],
+            callback=log_cb
+        )
+        
+        backtest_state["results"] = results
+        backtest_state["message"] = "Backtest completed."
+            
+    except Exception as e:
+        logger.error(f"Backtest failed: {e}")
+        backtest_state["message"] = f"Error: {str(e)}"
+    finally:
+        backtest_state["is_running"] = False
+
+@router.post("/backtest")
+async def trigger_backtest(request: BacktestRequest):
+    global backtest_state
+    if backtest_state["is_running"]:
+        return {"message": "Backtest already running", "status": backtest_state}
+        
+    threading.Thread(target=run_backtest_background, args=(request.dict(),)).start()
+    return {"message": "Backtest initiated", "status": backtest_state}
+
+@router.get("/backtest/status")
+async def get_backtest_status():
+    return backtest_state
 
 @router.get("/data/status")
 async def get_data_status():

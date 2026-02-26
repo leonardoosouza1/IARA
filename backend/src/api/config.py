@@ -41,10 +41,9 @@ class Settings:
     # Database (optional, for future integration)
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
-    # Alpaca
-    ALPACA_API_KEY: str = os.getenv("ALPACA_API_KEY", "")
-    ALPACA_SECRET_KEY: str = os.getenv("ALPACA_SECRET_KEY", "")
-    ALPACA_PAPER: bool = os.getenv("ALPACA_PAPER", "true").lower() == "true"
+    # Binance
+    BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
+    BINANCE_SECRET_KEY: str = os.getenv("BINANCE_SECRET_KEY", "")
 
 
 settings = Settings()

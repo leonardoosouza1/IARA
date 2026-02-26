@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("ContinuousLearner")
 
 class ContinuousLearner:
-    def __init__(self, checkpoint_path: str = "logs/models/active_model.pth", device: Optional[str] = None):
+    def __init__(self, checkpoint_path: str = "logs/models/active_model_v10.pth", device: Optional[str] = None):
         self.checkpoint_path = checkpoint_path
         
         # 🚀 Phase 9: Automatic Hardware Detection (CUDA/ROCm)
@@ -57,7 +57,19 @@ class ContinuousLearner:
         self.worker_hidden = 64 # Matches Golden active_model.pth
         self.coord_hidden = 256 # Matches Golden active_model.pth
         self.seq_len = 128
-        self.input_dim = 26 # v11.0 Dojo (22 indicators + CVD + OI)
+        
+        # 🚀 Phase 22: Dynamic Input Dimension from Advanced Data Science Pipeline
+        self.input_dim = 26 # Fallback
+        norm_path = "data/cache/EURUSD/norm_params.pt"
+        if os.path.exists(norm_path):
+            try:
+                meta = torch.load(norm_path, map_location='cpu', weights_only=True)
+                if 'feature_cols' in meta:
+                    self.input_dim = len(meta['feature_cols'])
+                    logger.info(f"🧬 Loaded dynamic input_dim={self.input_dim} from Boruta ExtraTrees pruning.")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not load norm_params.pt: {e}. Using fallback input_dim=26")
+        
         
         # Hyperparameters (Gladiator v9.7 Presets)
         self.epochs = 5
@@ -78,11 +90,16 @@ class ContinuousLearner:
         ]
         self.optimizer = torch.optim.AdamW(optimizer_grouped_parameters)
         
-        # 🚀 Phase 14: Learning Rate Scheduler & Trauma Buffer
+        # 🚀 Phase 14 v2: Persistent Prioritized Experience Replay
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=2)
         self.trauma_buffer_X = []
         self.trauma_buffer_Y = []
-        self.trauma_threshold = 2.5 # Minimum loss to be considered a 'Trauma'
+        self.trauma_buffer_losses = []  # Track individual sample losses for priority
+        self.trauma_threshold = 1.15  # Minimum loss to enter trauma memory (adjusted for stabilized loss)
+        self.trauma_mastery_threshold = 0.95  # Loss below this = mastered, can be evicted
+        self.trauma_mix_ratio = 0.20  # 20% of each batch will be trauma samples
+        self.trauma_mix_interval = 3  # Mix trauma every N batches
+        self.MAX_TRAUMA = 15000  # Larger persistent memory
         
         self.scaler = torch.amp.GradScaler('cuda', enabled=self._use_grad_scaler())
 
@@ -95,6 +112,9 @@ class ContinuousLearner:
         self.best_val_loss = float('inf')
         self.epochs_without_improvement = 0
         self.patience_threshold = 7
+        
+        # 🚀 Phase 20: Anti-DDoS Challenger Cooldown
+        self.challenger_cooldown = 0
 
     def _use_grad_scaler(self) -> bool:
         """Detect if GradScaler should be enabled. Disabled on AMD ROCm."""
@@ -206,6 +226,7 @@ class ContinuousLearner:
                     
                 # 🚀 Phase 11: Feature Sanitization
                 features = torch.nan_to_num(features)
+                features = torch.clamp(features, min=-20.0, max=20.0)
                     
                 X.append(features.to(self.device))
                 Y.append(target_scalar)
@@ -246,62 +267,162 @@ class ContinuousLearner:
         
         return x_dict
 
-    def _add_to_trauma_buffer(self, x: torch.Tensor, y: torch.Tensor):
-        """Phase 14: Experience Replay. Stores High-Loss batches for focused retraining."""
-        # Only store a reasonable amount to prevent RAM overflow
-        MAX_TRAUMA = 5000
+    def _add_to_trauma_buffer(self, x: torch.Tensor, y: torch.Tensor, loss_val: float = None):
+        """Phase 14 v2: Persistent Memory. Stores high-loss samples with their loss scores."""
         for i in range(len(x)):
-            self.trauma_buffer_X.append(x[i].cpu()) # Store on CPU
+            self.trauma_buffer_X.append(x[i].cpu())
             self.trauma_buffer_Y.append(y[i].cpu())
+            self.trauma_buffer_losses.append(loss_val if loss_val else self.trauma_threshold)
         
-        if len(self.trauma_buffer_X) > MAX_TRAUMA:
-            # Keep the newest traumas
-            self.trauma_buffer_X = self.trauma_buffer_X[-MAX_TRAUMA:]
-            self.trauma_buffer_Y = self.trauma_buffer_Y[-MAX_TRAUMA:]
+        if len(self.trauma_buffer_X) > self.MAX_TRAUMA:
+            # Evict the EASIEST traumas (lowest loss), keeping the hardest ones
+            indexed = sorted(enumerate(self.trauma_buffer_losses), key=lambda x: x[1], reverse=True)
+            keep_indices = [idx for idx, _ in indexed[:self.MAX_TRAUMA]]
+            keep_indices.sort()  # Preserve temporal order
+            self.trauma_buffer_X = [self.trauma_buffer_X[i] for i in keep_indices]
+            self.trauma_buffer_Y = [self.trauma_buffer_Y[i] for i in keep_indices]
+            self.trauma_buffer_losses = [self.trauma_buffer_losses[i] for i in keep_indices]
 
-    def _train_trauma_replay(self, callback=None):
-        """Forces the model to retrain exclusively on the Trauma Buffer."""
+    def _get_trauma_mix_batch(self, current_batch_size: int):
+        """Phase 14 v2: Sample trauma memories to mix into current training batch.
+        Returns a subset of trauma samples proportional to trauma_mix_ratio.
+        Higher-loss traumas have higher probability of being selected (Prioritized Replay)."""
+        if not self.trauma_buffer_X:
+            return None, None
+        
+        n_trauma = max(1, int(current_batch_size * self.trauma_mix_ratio))
+        n_trauma = min(n_trauma, len(self.trauma_buffer_X))
+        
+        # Prioritized sampling: probability proportional to loss
+        losses = np.array(self.trauma_buffer_losses)
+        probs = losses / losses.sum()  # Normalize to probability distribution
+        
+        indices = np.random.choice(len(self.trauma_buffer_X), size=n_trauma, replace=False, p=probs)
+        
+        X = torch.stack([self.trauma_buffer_X[i] for i in indices]).to(self.device)
+        Y = torch.stack([self.trauma_buffer_Y[i] for i in indices]).to(self.device)
+        return X, Y
+
+    def _train_trauma_replay(self, callback=None, epochs: int = 3):
+        """Phase 14 v2: Intensive Persistent Replay with Graduated Eviction.
+        Replays trauma buffer multiple times to force error correction.
+        Instead, samples that the model has 'mastered' (loss < mastery_threshold) are evicted."""
         if not self.trauma_buffer_X:
             return
             
-        if callback: callback(f"🧠 Initiating Trauma Replay... Retraining on {len(self.trauma_buffer_X)} severe mistakes.")
+        if callback: callback(f"🧠 Initiating Intensive Trauma Replay ({epochs} epochs)... Retraining on {len(self.trauma_buffer_X)} persistent memories.")
         self.model.train()
         
         X = torch.stack(self.trauma_buffer_X)
         Y = torch.stack(self.trauma_buffer_Y)
         
-        total_loss = 0.0
-        batches = 0
-        for i in range(0, len(X), self.batch_size):
-            batch_X = X[i:i+self.batch_size].to(self.device)
-            batch_y = Y[i:i+self.batch_size].to(self.device)
+        mastered_indices = set()  # Track which samples have been mastered across all replays
+        
+        for replay_epoch in range(epochs):
+            total_loss = 0.0
+            batches = 0
+            sample_offset = 0
             
-            self.optimizer.zero_grad()
-            x_dict = self._simulate_timeframes(batch_X)
+            # Shuffle data for this replay epoch
+            indices = torch.randperm(len(X))
+            X_shuffled = X[indices]
+            Y_shuffled = Y[indices]
+            
+            for i in range(0, len(X), self.batch_size):
+                batch_X = X_shuffled[i:i+self.batch_size].to(self.device)
+                batch_y = Y_shuffled[i:i+self.batch_size].to(self.device)
+                batch_len = len(batch_X)
+                
+                self.optimizer.zero_grad()
+                x_dict = self._simulate_timeframes(batch_X)
             
             with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
                 logits, worker_logits, _, _, attn_w, confidence = self.model(x_dict)
                 loss_dict = self.criterion(logits, worker_logits, batch_y)
                 loss = loss_dict["total"]
                 
-            if torch.isnan(loss):
-                continue
+                # Titanium Shield for Trauma Replay
+                if not torch.isfinite(loss) or loss.item() > 15.0:
+                    sample_offset += batch_len
+                    continue
                 
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) # Stricter clip for trauma
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            
-            total_loss += loss.item()
-            batches += 1
-            
-        if callback and batches > 0:
-            callback(f"✅ Trauma Replay completed. Avg Loss: {total_loss/batches:.4f}")
+                # Check per-sample losses to identify mastered items
+                with torch.no_grad():
+                    per_sample_loss = torch.nn.functional.cross_entropy(logits, batch_y, reduction='none')
+                    for j in range(batch_len):
+                        orig_idx = indices[sample_offset + j].item()
+                        sample_loss = per_sample_loss[j].item()
+                        # Update the stored loss for this sample
+                        if orig_idx < len(self.trauma_buffer_losses):
+                            self.trauma_buffer_losses[orig_idx] = sample_loss
+                        # Mark as mastered if loss is low enough
+                        if sample_loss < self.trauma_mastery_threshold:
+                            mastered_indices.add(orig_idx)
+                    
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                
+                total_loss += loss.item()
+                batches += 1
+                sample_offset += batch_len
+                
+            if callback and batches > 0:
+                callback(f"  ↪ Pass {replay_epoch+1}/{epochs} | Avg Loss: {total_loss/batches:.4f} | Cumulative Mastered: {len(mastered_indices)}/{len(X)}")
         
-        # Clear buffer after processing
-        self.trauma_buffer_X = []
-        self.trauma_buffer_Y = []
+        # Graduated Eviction: Only remove samples the model has proven mastery over
+        if mastered_indices:
+            keep_mask = set(range(len(self.trauma_buffer_X))) - mastered_indices
+            keep_list = sorted(keep_mask)
+            self.trauma_buffer_X = [self.trauma_buffer_X[i] for i in keep_list]
+            self.trauma_buffer_Y = [self.trauma_buffer_Y[i] for i in keep_list]
+            self.trauma_buffer_losses = [self.trauma_buffer_losses[i] for i in keep_list]
+
+    def _emit_epoch_comparison(self, epoch_history: list, callback=None):
+        """Phase 14 v2: Emit a bird's-eye comparison table of all completed epochs."""
+        if not callback or not epoch_history:
+            return
+        
+        callback("━" * 90)
+        callback("📊 EPOCH COMPARISON DASHBOARD")
+        callback("━" * 90)
+        callback(f"{'Epoch':<7} {'Loss':>8} {'Acc':>6} {'Prec':>6} {'AUC':>6} {'F1':>6} {'Traumas':>9} {'Mastered':>10} {'LR':>10}")
+        callback("─" * 90)
+        
+        for entry in epoch_history:
+            lr_str = f"{entry['lr']:.6f}"
+            callback(
+                f"  E{entry['epoch']:<4} "
+                f"{entry['loss']:>8.4f} "
+                f"{entry['acc']:>6.2f} "
+                f"{entry['prec']:>6.2f} "
+                f"{entry['auc']:>6.2f} "
+                f"{entry['f1']:>6.2f} "
+                f"{entry['trauma_size']:>9} "
+                f"{entry['mastered']:>10} "
+                f"{lr_str:>10}"
+            )
+        
+        # Show trend arrows comparing last two epochs
+        if len(epoch_history) >= 2:
+            prev = epoch_history[-2]
+            curr = epoch_history[-1]
+            arrows = []
+            for metric in ['loss', 'acc', 'prec', 'auc', 'f1']:
+                diff = curr[metric] - prev[metric]
+                if metric == 'loss':
+                    # Lower loss is better
+                    arrow = "🟢↓" if diff < -0.01 else ("🔴↑" if diff > 0.01 else "⚪→")
+                else:
+                    # Higher is better for other metrics
+                    arrow = "🟢↑" if diff > 0.01 else ("🔴↓" if diff < -0.01 else "⚪→")
+                arrows.append(f"{metric.upper()}: {arrow}")
+            callback("─" * 90)
+            callback(f"📈 Tendência: {' | '.join(arrows)}")
+        
+        callback("━" * 90)
 
     def train_and_evaluate(self, callback=None, stop_check=None):
         if callback: callback(f"🖥️ Device: {self.device} | Building dataset from Trade Journal...")
@@ -323,6 +444,7 @@ class ContinuousLearner:
         total_steps = self.epochs * num_batches
         current_step = 0
         stopped = False
+        epoch_history = []  # 📊 Bird's-eye epoch comparison tracker
         
         for epoch in range(self.epochs):
             if stopped:
@@ -355,10 +477,16 @@ class ContinuousLearner:
                 adv_prob = 0.0 if epoch == 0 else (0.1 if epoch == 1 else 0.3)
                 
                 # 🚀 Phase 13: Adversarial "Prank" Generation
-                is_adversarial = torch.rand(1).item() < adv_prob
+                if self.challenger_cooldown > 0:
+                    is_adversarial = False
+                    self.challenger_cooldown -= 1
+                else:
+                    is_adversarial = torch.rand(1).item() < adv_prob
+                
                 current_pressure = self.guard.get_pressure()
                 
                 if is_adversarial:
+                    self.challenger_cooldown = 3  # 🔥 Cooldown of 3 batches to prevent DDoS
                     self.challenger.eval()
                     batch_X_orig = batch_X.clone()
                     if callback and batch_count % 50 == 0:
@@ -381,13 +509,28 @@ class ContinuousLearner:
                     loss_dict = self.criterion(logits, worker_logits, batch_y)
                     loss = loss_dict["total"]
 
-                if torch.isnan(loss):
-                    if callback: callback(f"⚠️ Warning: NaN detected in Batch {batch_count+1}. Skipping update.")
+                # 🛡️ Titanium Shield: Pre-Backward Protection against NaNs and Exceeding Bounds
+                if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 15.0:
+                    val_str = f"NaN/Inf" if not torch.isfinite(loss) else f"{loss.item():.2f}"
+                    if callback: callback(f"⚠️ Red Alert: Extreme Loss ({val_str}) detected in Batch {batch_count+1}. Titanium Shield activated. Skipping update to prevent collapse.")
                     continue
 
-                # Phase 14: Populate Trauma Buffer
-                if loss.item() > self.trauma_threshold:
-                    self._add_to_trauma_buffer(batch_X.detach(), batch_y.detach())
+                # Phase 14 v2: Populate Trauma Buffer with loss score
+                current_loss = loss.item()
+                if current_loss > self.trauma_threshold:
+                    self._add_to_trauma_buffer(batch_X.detach(), batch_y.detach(), loss_val=current_loss)
+                
+                # Phase 14 v2: Inline Trauma Mix - inject old mistakes into current learning
+                if batch_count % self.trauma_mix_interval == 0 and len(self.trauma_buffer_X) > 0:
+                    trauma_X, trauma_Y = self._get_trauma_mix_batch(len(batch_X))
+                    if trauma_X is not None:
+                        trauma_dict = self._simulate_timeframes(trauma_X)
+                        with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
+                            t_logits, t_worker_logits, _, _, _, _ = self.model(trauma_dict)
+                            t_loss_dict = self.criterion(t_logits, t_worker_logits, trauma_Y)
+                            trauma_loss = t_loss_dict["total"] * 0.3  # Weight trauma replay at 30%
+                        if not torch.isnan(trauma_loss):
+                            self.scaler.scale(trauma_loss).backward()
 
                 # 1. Trader Backward
                 self.scaler.scale(loss).backward()
@@ -407,7 +550,8 @@ class ContinuousLearner:
 
                 # 3. Step Optimizers
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                # 🛡️ Titanium Shield: Strict Maximum Gradient Normalization
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 
                 self.scaler.step(self.optimizer)
                 if is_adversarial:
@@ -464,15 +608,16 @@ class ContinuousLearner:
                 current_step += 1
                 
                 # Report every 10 batches for high-fidelity UI tracking
-                if callback and batch_count % 10 == 0:
+                if batch_count % 10 == 0:
                     progress = int((current_step / total_steps) * 100)
-                    sw_weights = [f"{w:.2f}" for w in loss_dict["weights"]]
-                    # Expert "Thoughts" Insight
-                    exp_votes = worker_logits.argmax(dim=-1).cpu().numpy()[0]
-                    v_map = {0: "L", 1: "S", 2: "W"}
-                    thought_str = "-".join([v_map[v] for v in exp_votes])
                     
-                    callback(f"Epoch {epoch+1} | B {batch_count} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | Pressure: {is_adversarial * current_pressure:.2f} | {progress}%")
+                    # Log to console less frequently (every 100 batches) to prevent spam
+                    if callback and batch_count % 100 == 0:
+                        sw_weights = [f"{w:.2f}" for w in loss_dict["weights"]]
+                        exp_votes = worker_logits.argmax(dim=-1).cpu().numpy()[0]
+                        v_map = {0: "L", 1: "S", 2: "W"}
+                        thought_str = "-".join([v_map[v] for v in exp_votes])
+                        callback(f"Epoch {epoch+1} | B {batch_count} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | Pressure: {is_adversarial * current_pressure:.2f} | {progress}%")
                     
                     # 🧠 Phase 20: Micro-State Telemetry for "Opened Brain" Dashboard
                     if hasattr(self, '_micro_state_callback') and self._micro_state_callback:
@@ -507,15 +652,55 @@ class ContinuousLearner:
                     best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                     if callback: callback(f"🏆 Epoch {epoch+1} | New best model (Journal)! Loss: {best_loss:.4f}")
                     # Phase 14: Immediate Auto-Save
-                    save_path = self.checkpoint_path or "logs/models/active_model.pth"
+                    save_path = self.checkpoint_path or "logs/models/active_model_v10.pth"
                     torch.save({'model_state_dict': self.model.state_dict()}, save_path)
                     if callback: callback(f"💾 Epoch {epoch+1} | Auto-saved best model to {os.path.basename(save_path)}")
                 
             # Phase 14: Execute Trauma Replay
+            trauma_mastered = 0
+            trauma_size_before = len(self.trauma_buffer_X)
             if len(self.trauma_buffer_X) > 0:
-                if callback: callback(f"🧠 Epoch {epoch+1} | Initiating Trauma Replay... Retraining on {len(self.trauma_buffer_X)} severe mistakes.")
+                if callback: callback(f"🧠 Epoch {epoch+1} | Initiating Trauma Replay... Retraining on {len(self.trauma_buffer_X)} persistent memories.")
+                trauma_size_before = len(self.trauma_buffer_X)
                 self._train_trauma_replay(lambda m: callback(f"Epoch {epoch+1} | {m}"))
+                trauma_mastered = trauma_size_before - len(self.trauma_buffer_X)
                 if callback: callback(f"✅ Epoch {epoch+1} | Trauma Replay completed.")
+            
+            # 📊 Epoch Comparison: Compute aggregate metrics and record snapshot
+            if batch_count > 0:
+                epoch_avg_acc = np.mean([accuracy_score(l, p) for l, p in zip(epoch_all_labels, epoch_all_preds)]) if epoch_all_preds else 0.0
+                epoch_avg_prec = np.mean([precision_score(l, p, average='macro', zero_division=0) for l, p in zip(epoch_all_labels, epoch_all_preds)]) if epoch_all_preds else 0.0
+                epoch_avg_f1 = np.mean([f1_score(l, p, average='macro', zero_division=0) for l, p in zip(epoch_all_labels, epoch_all_preds)]) if epoch_all_preds else 0.0
+                # Epoch-level AUC from all accumulated probs
+                epoch_auc = 0.5
+                if epoch_all_probs and epoch_all_labels:
+                    try:
+                        all_l = np.concatenate(epoch_all_labels)
+                        all_p = np.concatenate(epoch_all_probs)
+                        present = np.unique(all_l).astype(int).tolist()
+                        if len(present) >= 2:
+                            norm_p = all_p / all_p.sum(axis=1, keepdims=True)
+                            if len(present) == 3:
+                                epoch_auc = roc_auc_score(all_l, norm_p, multi_class='ovr', average='macro', labels=[0,1,2])
+                            else:
+                                bp = norm_p[:, present]
+                                bp = bp / bp.sum(axis=1, keepdims=True)
+                                epoch_auc = roc_auc_score(all_l, bp[:, 1], labels=present)
+                    except Exception:
+                        epoch_auc = 0.5
+                
+                epoch_history.append({
+                    'epoch': epoch + 1,
+                    'loss': epoch_loss / batch_count,
+                    'acc': epoch_avg_acc,
+                    'prec': epoch_avg_prec,
+                    'auc': epoch_auc,
+                    'f1': epoch_avg_f1,
+                    'trauma_size': len(self.trauma_buffer_X),
+                    'mastered': trauma_mastered,
+                    'lr': self.optimizer.param_groups[0]['lr'],
+                })
+                self._emit_epoch_comparison(epoch_history, callback)
 
         # Restore and save the best model weights
         if best_state:
@@ -561,6 +746,7 @@ class ContinuousLearner:
                 continue
         
         if total_epoch_batches == 0: total_epoch_batches = 1
+        epoch_history = []  # 📊 Bird's-eye epoch comparison tracker
         
         for epoch in range(self.epochs):
             if stopped:
@@ -623,17 +809,24 @@ class ContinuousLearner:
                 
                 # 🚀 Phase 11: Feature Sanitization
                 batch_X = torch.nan_to_num(batch_X)
+                batch_X = torch.clamp(batch_X, min=-20.0, max=20.0)
                 
                 # 🚀 Phase 13 & 16: Extreme Warmup Schedule
                 # Ep 1-2: 0%, Ep 3-4: 5%, Ep 5-6: 10%, Ep 7-8: 15%, Ep 9+: 30%
                 adv_schedule = [0.0, 0.0, 0.05, 0.05, 0.10, 0.10, 0.15, 0.15]
                 adv_prob = adv_schedule[epoch] if epoch < len(adv_schedule) else 0.30
                 
-                # 🚀 Phase 13: Adversarial "Prank" Generation
-                is_adversarial = torch.rand(1).item() < adv_prob
+                # 🚀 Phase 13: Adversarial "Prank" Generation (With Cooldown)
+                if self.challenger_cooldown > 0:
+                    is_adversarial = False
+                    self.challenger_cooldown -= 1
+                else:
+                    is_adversarial = torch.rand(1).item() < adv_prob
+                    
                 current_pressure = self.guard.get_pressure()
                 
                 if is_adversarial:
+                    self.challenger_cooldown = 3 # 🔥 Cooldown
                     # Challenger attempts to 'prank' the features to confuse the Trader
                     self.challenger.eval() # Generator doesn't update its own weights during this pass
                     batch_X_orig = batch_X.clone()
@@ -661,12 +854,28 @@ class ContinuousLearner:
                     loss_dict = self.criterion(logits, worker_logits, batch_y)
                     loss = loss_dict["total"]
 
-                if torch.isnan(loss):
+                # 🛡️ Titanium Shield: Pre-Backward Protection against NaNs and Exceeding Bounds
+                if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 15.0:
+                    val_str = f"NaN/Inf" if not torch.isfinite(loss) else f"{loss.item():.2f}"
+                    if callback: callback(f"⚠️ Red Alert: Extreme Loss ({val_str}) detected in Shard. Titanium Shield activated. Skipping update.")
                     continue
 
-                # Phase 14: Populate Trauma Buffer
-                if loss.item() > self.trauma_threshold:
-                    self._add_to_trauma_buffer(batch_X.detach(), batch_y.detach())
+                # Phase 14 v2: Populate Trauma Buffer with loss score
+                current_loss = loss.item()
+                if current_loss > self.trauma_threshold:
+                    self._add_to_trauma_buffer(batch_X.detach(), batch_y.detach(), loss_val=current_loss)
+                
+                # Phase 14 v2: Inline Trauma Mix - inject old mistakes into current learning
+                if epoch_batches % self.trauma_mix_interval == 0 and len(self.trauma_buffer_X) > 0:
+                    trauma_X, trauma_Y = self._get_trauma_mix_batch(len(batch_X))
+                    if trauma_X is not None:
+                        trauma_dict = self._simulate_timeframes(trauma_X)
+                        with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
+                            t_logits, t_worker_logits, _, _, _, _ = self.model(trauma_dict)
+                            t_loss_dict = self.criterion(t_logits, t_worker_logits, trauma_Y)
+                            trauma_loss = t_loss_dict["total"] * 0.3  # Weight trauma replay at 30%
+                        if not torch.isnan(trauma_loss):
+                            self.scaler.scale(trauma_loss).backward()
 
                 # 1. Trader Backward
                 self.scaler.scale(loss).backward()
@@ -689,7 +898,8 @@ class ContinuousLearner:
 
                 # 3. Step Optimizers
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                # 🛡️ Titanium Shield: Strict Maximum Gradient Normalization
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 
                 self.scaler.step(self.optimizer)
                 if is_adversarial:
@@ -754,16 +964,16 @@ class ContinuousLearner:
                 total_batches += 1
                 
                 # Report every 5 batches for high-fidelity "Chart Dance"
-                if callback and epoch_batches % 5 == 0:
+                if epoch_batches % 5 == 0:
                     progress = int((epoch_batches / total_epoch_batches) * 100)
-                    sw_weights = [f"{w:.2f}" for w in loss_dict["weights"]]
                     
-                    # Expert "Thoughts" Insight
-                    exp_votes = worker_logits.argmax(dim=-1).cpu().numpy()[0] 
-                    v_map = {0: "L", 1: "S", 2: "W"}
-                    thought_str = "-".join([v_map[v] for v in exp_votes])
-                    
-                    callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | Pressure: {is_adversarial * current_pressure:.2f} | {progress}%")
+                    # Log to console less frequently (every 100 batches)
+                    if callback and epoch_batches % 100 == 0:
+                        sw_weights = [f"{w:.2f}" for w in loss_dict["weights"]]
+                        exp_votes = worker_logits.argmax(dim=-1).cpu().numpy()[0] 
+                        v_map = {0: "L", 1: "S", 2: "W"}
+                        thought_str = "-".join([v_map[v] for v in exp_votes])
+                        callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | Pressure: {is_adversarial * current_pressure:.2f} | {progress}%")
                     
                     # 🧠 Phase 20: Micro-State Telemetry for "Opened Brain" Dashboard
                     if hasattr(self, '_micro_state_callback') and self._micro_state_callback:
@@ -799,30 +1009,29 @@ class ContinuousLearner:
                 with torch.no_grad():
                     for v_shard in val_shards[:2]: # Sample 2 shards for speed
                         v_data = torch.load(os.path.join(val_shard_dir, v_shard), map_location='cpu')
-                        v_X, v_y = v_data['X'].to(self.device), v_data['y'].to(self.device).long()
+                        v_X_cpu, v_y_cpu = v_data['X'], v_data['y']
                         
-                        # 🚀 Dynamic Tensor Padding for Validation Datasets
-                        is_old_val_shard = (v_X.shape[-1] in [12, 22, 26])
-                        
-                        if is_old_val_shard:
-                            core_v_X = v_X[:, :, :12]
-                            if self.input_dim > 12:
-                                padding = torch.zeros(v_X.shape[0], v_X.shape[1], self.input_dim - 12, dtype=v_X.dtype, device=v_X.device)
-                                v_X = torch.cat([core_v_X, padding], dim=-1)
-                            else:
-                                v_X = core_v_X
-                        else:
-                            if v_X.shape[-1] > self.input_dim:
+                        for j in range(0, len(v_X_cpu), self.batch_size):
+                            v_X = v_X_cpu[j : j + self.batch_size].to(self.device)
+                            v_y = v_y_cpu[j : j + self.batch_size].to(self.device).long()
+                            
+                            # 🚀 Robust Dimension Migration for Validation
+                            shard_dim = v_X.shape[-1]
+                            if shard_dim > self.input_dim:
                                 v_X = v_X[:, :, :self.input_dim]
-                            elif v_X.shape[-1] < self.input_dim:
-                                padding = torch.zeros(v_X.shape[0], v_X.shape[1], self.input_dim - v_X.shape[-1], dtype=v_X.dtype, device=v_X.device)
+                            elif shard_dim < self.input_dim:
+                                padding = torch.zeros(v_X.shape[0], v_X.shape[1], self.input_dim - shard_dim, dtype=v_X.dtype, device=v_X.device)
                                 v_X = torch.cat([v_X, padding], dim=-1)
-                        
-                        v_x_dict = self._simulate_timeframes(v_X)
-                        v_logits, v_worker_logits, _, _, _, _ = self.model(v_x_dict)
-                        v_loss_dict = self.criterion(v_logits, v_worker_logits, v_y)
-                        val_loss += v_loss_dict["total"].item()
-                        val_batches += 1
+                                
+                            # Ensure no NaNs or extreme values in validation
+                            v_X = torch.nan_to_num(v_X)
+                            v_X = torch.clamp(v_X, min=-20.0, max=20.0)
+                            
+                            v_x_dict = self._simulate_timeframes(v_X)
+                            v_logits, v_worker_logits, _, _, _, _ = self.model(v_x_dict)
+                            v_loss_dict = self.criterion(v_logits, v_worker_logits, v_y)
+                            val_loss += v_loss_dict["total"].item()
+                            val_batches += 1
                             
                 if val_batches > 0:
                     avg_val_loss = val_loss / val_batches
@@ -863,9 +1072,13 @@ class ContinuousLearner:
                         self.epochs_without_improvement = 0 # Reset tracker
 
             # Phase 14: Execute Trauma Replay at the end of every epoch if accumulated
+            trauma_mastered = 0
+            trauma_size_before = len(self.trauma_buffer_X)
             if len(self.trauma_buffer_X) > 0:
-                if callback: callback(f"🧠 Epoch {epoch+1} | Initiating Trauma Replay... Retraining on {len(self.trauma_buffer_X)} severe mistakes.")
+                if callback: callback(f"🧠 Epoch {epoch+1} | Initiating Trauma Replay... Retraining on {len(self.trauma_buffer_X)} persistent memories.")
+                trauma_size_before = len(self.trauma_buffer_X)
                 self._train_trauma_replay(lambda m: callback(f"Epoch {epoch+1} | {m}"))
+                trauma_mastered = trauma_size_before - len(self.trauma_buffer_X)
                 if callback: callback(f"✅ Epoch {epoch+1} | Trauma Replay completed.")
             
             if epoch_batches > 0:
@@ -878,27 +1091,61 @@ class ContinuousLearner:
                     best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                     if callback: callback(f"🏆 Epoch {epoch+1} | New best model (Dataset)! Loss: {best_loss:.4f}")
                     # Phase 14: Immediate Auto-Save
-                    save_path = self.checkpoint_path or "logs/models/active_model.pth"
+                    save_path = self.checkpoint_path or "logs/models/active_model_v10.pth"
                     torch.save({'model_state_dict': self.model.state_dict()}, save_path)
                     if callback: callback(f"💾 Epoch {epoch+1} | Auto-saved best model to {os.path.basename(save_path)}")
+                
+                # 📊 Epoch Comparison: Compute aggregate metrics and record snapshot
+                epoch_avg_acc = np.mean([accuracy_score(l, p) for l, p in zip(epoch_all_labels, epoch_all_preds)]) if epoch_all_preds else 0.0
+                epoch_avg_prec = np.mean([precision_score(l, p, average='macro', zero_division=0) for l, p in zip(epoch_all_labels, epoch_all_preds)]) if epoch_all_preds else 0.0
+                epoch_avg_f1 = np.mean([f1_score(l, p, average='macro', zero_division=0) for l, p in zip(epoch_all_labels, epoch_all_preds)]) if epoch_all_preds else 0.0
+                epoch_auc = 0.5
+                if epoch_all_probs and epoch_all_labels:
+                    try:
+                        all_l = np.concatenate(epoch_all_labels)
+                        all_p = np.concatenate(epoch_all_probs)
+                        present = np.unique(all_l).astype(int).tolist()
+                        if len(present) >= 2:
+                            norm_p = all_p / all_p.sum(axis=1, keepdims=True)
+                            if len(present) == 3:
+                                epoch_auc = roc_auc_score(all_l, norm_p, multi_class='ovr', average='macro', labels=[0,1,2])
+                            else:
+                                bp = norm_p[:, present]
+                                bp = bp / bp.sum(axis=1, keepdims=True)
+                                epoch_auc = roc_auc_score(all_l, bp[:, 1], labels=present)
+                    except Exception:
+                        epoch_auc = 0.5
+                
+                epoch_history.append({
+                    'epoch': epoch + 1,
+                    'loss': avg_epoch_loss,
+                    'acc': epoch_avg_acc,
+                    'prec': epoch_avg_prec,
+                    'auc': epoch_auc,
+                    'f1': epoch_avg_f1,
+                    'trauma_size': len(self.trauma_buffer_X),
+                    'mastered': trauma_mastered,
+                    'lr': self.optimizer.param_groups[0]['lr'],
+                })
+                self._emit_epoch_comparison(epoch_history, callback)
 
         # Restore and save the best model weights
         if best_state:
             self.model.load_state_dict(best_state)
         
-        save_path = self.checkpoint_path or "logs/models/active_model.pth"
+        save_path = self.checkpoint_path or "logs/models/active_model_v10.pth"
         if callback: callback(f"💾 Saving best checkpoint (Loss: {best_loss:.4f}) to {os.path.basename(save_path)}...")
         torch.save({'model_state_dict': self.model.state_dict()}, save_path)
         self.update_registry(best_loss, {dataset_name})
         
     def update_registry(self, loss: float, symbols: set):
-        version_tag = "v9.7-Live"
+        version_tag = "v10.0-Live"
         registry_entry = self.db.query(ModelVersion).filter(ModelVersion.tag == version_tag).first()
         
         if not registry_entry:
             registry_entry = ModelVersion(
                 tag=version_tag,
-                path="logs/models/active_model.pth",
+                path="logs/models/active_model_v10.pth",
                 is_active=True,
                 metrics={}
             )

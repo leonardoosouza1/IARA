@@ -22,12 +22,9 @@ from src.database.core import AsyncSessionLocal
 from src.database.models import AgentProfile
 from sqlalchemy.future import select
 
-# Alpaca Data API
-from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
-from alpaca.data.requests import CryptoBarsRequest, CryptoLatestTradeRequest, StockBarsRequest, StockLatestTradeRequest
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-
-from src.api.sensory_hub import AlpacaSensoryHub
+# Binance API
+from binance.client import Client
+from src.api.sensory_hub import BinanceSensoryHub
 
 logger = logging.getLogger("MarketDataService")
 
@@ -48,26 +45,26 @@ class MarketDataService:
         self.history: Dict[str, list] = {}  # In-memory history buffer
         
         # Clients
-        self.crypto_client: Optional[CryptoHistoricalDataClient] = None
+        self.crypto_client: Optional[Client] = None
         
-        self.api_key = os.getenv("ALPACA_API_KEY")
-        self.secret_key = os.getenv("ALPACA_SECRET_KEY")
+        self.api_key = os.getenv("BINANCE_API_KEY")
+        self.secret_key = os.getenv("BINANCE_SECRET_KEY")
         
         # Sensory Hub (RAIO-X)
-        self.sensory_hub: Optional[AlpacaSensoryHub] = None
+        self.sensory_hub: Optional[BinanceSensoryHub] = None
 
     async def _init_exchanges(self):
-        """Initialize Alpaca Data Clients."""
+        """Initialize Binance Data Clients."""
         if not self.api_key:
-             logger.warning("Alpaca keys missing. Running in simulation mode.")
+             logger.warning("Binance keys missing. Running in simulation mode.")
              return
 
         try:
-            self.crypto_client = CryptoHistoricalDataClient(self.api_key, self.secret_key)
-            self.sensory_hub = AlpacaSensoryHub(self.api_key, self.secret_key)
-            logger.info("✅ Connected to Alpaca Data API (Crypto & Sensory Hub)")
+            self.crypto_client = Client(self.api_key, self.secret_key)
+            self.sensory_hub = BinanceSensoryHub(self.api_key, self.secret_key)
+            logger.info("✅ Connected to Binance Data API (Crypto & Sensory Hub)")
         except Exception as e:
-            logger.error(f"Failed to initialize Alpaca Data: {e}")
+            logger.error(f"Failed to initialize Binance Data: {e}")
             self.crypto_client = None
             self.sensory_hub = None
 
@@ -89,7 +86,7 @@ class MarketDataService:
                             symbol=a.symbol,
                             market_type=a.market_type,
                             model_name=a.model_version,
-                            execution_venue="ALPACA",
+                            execution_venue="BINANCE",
                         )
                         engine = fleet_manager.engines.get(agent_id)
                         if engine:
@@ -105,86 +102,65 @@ class MarketDataService:
     async def _pre_warm_engine(self, symbol: str, engine):
         """Fetch 48h of 5m bars and instantly fill the TrinityEngine buffer."""
         if not self.crypto_client:
-            logger.warning(f"No Alpaca client. Skipping pre-warm for {symbol}.")
+            logger.warning(f"No Binance client. Skipping pre-warm for {symbol}.")
             return
 
         try:
             logger.info(f"🔥 Pre-warming engine for {symbol} with 48h of 5m historical data...")
-            req = CryptoBarsRequest(
-                symbol_or_symbols=[symbol],
-                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-                start=datetime.now() - timedelta(hours=48),
-            )
-            bars = self.crypto_client.get_crypto_bars(req)
+            binance_symbol = symbol.replace("/", "").replace("-", "")
+            klines = self.crypto_client.get_historical_klines(binance_symbol, Client.KLINE_INTERVAL_5MINUTE, "48 hours ago UTC")
             
-            if symbol in bars.df.index.get_level_values(0):
-                df = bars.df.loc[symbol]
-                candles = []
-                for index, row in df.iterrows():
-                    candles.append({
-                        "time": int(index.timestamp()),
-                        "open": float(row["open"]),
-                        "high": float(row["high"]),
-                        "low": float(row["low"]),
-                        "close": float(row["close"]),
-                        "volume": float(row["volume"])
-                    })
+            candles = []
+            for k in klines:
+                candles.append({
+                    "time": int(k[0] / 1000),
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5])
+                })
                 
-                if candles:
-                    engine.pre_warm(candles)
+            if candles:
+                engine.pre_warm(candles)
             else:
                 logger.warning(f"No historical data found for {symbol} pre-warming.")
         except Exception as e:
             logger.error(f"Pre-warming failed for {symbol}: {e}")
 
     async def _fetch_price(self, symbol: str) -> Optional[float]:
-        """Fetch latest price from Alpaca."""
+        """Fetch latest price from Binance."""
         if not self.crypto_client:
             return None
 
-        # Determine asset class (simplistic check)
         try:
-             # Alpaca Crypto symbols: BTC/USD
-             req = CryptoLatestTradeRequest(symbol_or_symbols=[symbol])
-             res = self.crypto_client.get_crypto_latest_trade(req)
-             
-             if symbol in res:
-                 return float(res[symbol].price)
-             return None
-
+             binance_symbol = symbol.replace("/", "").replace("-", "")
+             res = self.crypto_client.get_symbol_ticker(symbol=binance_symbol)
+             return float(res['price'])
         except Exception as e:
             # logger.warning(f"Fetch failed for {symbol}: {e}") # Reduce noise
             return None
 
     async def _fetch_and_emit_history(self, symbol: str):
-        """Fetch historical candles from Alpaca and emit to frontend."""
+        """Fetch historical candles from Binance and emit to frontend."""
         candles = []
         
         if self.crypto_client:
             try:
                 # Fetch last 2 hours of 1-minute bars
-                req = CryptoBarsRequest(
-                    symbol_or_symbols=[symbol],
-                    timeframe=TimeFrame.Minute,
-                    start=datetime.now() - timedelta(hours=2),
-                    limit=100
-                )
-                bars = self.crypto_client.get_crypto_bars(req)
+                binance_symbol = symbol.replace("/", "").replace("-", "")
+                klines = self.crypto_client.get_historical_klines(binance_symbol, Client.KLINE_INTERVAL_1MINUTE, "2 hours ago UTC")
                 
-                if symbol in bars.df.index.get_level_values(0):
-                    df = bars.df.loc[symbol]
-                    # Convert to our format
-                    for index, row in df.iterrows():
-                        # index is timestamp
-                         candles.append({
-                            "time": int(index.timestamp()),
-                            "open": float(row["open"]),
-                            "high": float(row["high"]),
-                            "low": float(row["low"]),
-                            "close": float(row["close"]),
-                            "volume": float(row["volume"])
-                        })
-                    logger.info(f"Fetched {len(candles)} historical candles for {symbol} via Alpaca")
+                for k in klines:
+                    candles.append({
+                        "time": int(k[0] / 1000),
+                        "open": float(k[1]),
+                        "high": float(k[2]),
+                        "low": float(k[3]),
+                        "close": float(k[4]),
+                        "volume": float(k[5])
+                    })
+                logger.info(f"Fetched {len(candles)} historical candles for {symbol} via Binance")
             except Exception as e:
                 logger.warning(f"History fetch failed for {symbol}: {e}")
 
@@ -268,7 +244,7 @@ class MarketDataService:
         if self.sensory_hub:
             await self.sensory_hub.start(self.symbols)
         
-        logger.info("🚀 Market Data Service Started (Alpaca Source)")
+        logger.info("🚀 Market Data Service Started (Binance Source)")
         
         now = time.time()
         for s in self.symbols:

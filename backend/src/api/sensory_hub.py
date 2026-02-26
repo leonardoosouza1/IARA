@@ -1,98 +1,121 @@
-
 import asyncio
 import logging
 import os
 from typing import Dict, List, Optional
 import numpy as np
-from alpaca.data.live import CryptoDataStream
-from alpaca.data.models import Orderbook
+from binance import AsyncClient, BinanceSocketManager
 
 logger = logging.getLogger("SensoryHub")
 
-class AlpacaSensoryHub:
+class BinanceSensoryHub:
     """
     I.A.R.A. v10.0 - Sensory Hub (RAIO-X)
     =====================================
-    Handles real-time L2 Order Book streaming via Alpaca WebSockets.
+    Handles real-time L2 Order Book streaming via Binance WebSockets.
     Processes depth data into model-ready sensory vectors.
     """
     
     def __init__(self, api_key: str, secret_key: str):
         self.api_key = api_key
         self.secret_key = secret_key
-        self.stream: Optional[CryptoDataStream] = None
+        self.client: Optional[AsyncClient] = None
+        self.bsm: Optional[BinanceSocketManager] = None
         self.active_symbols: List[str] = []
+        self.active = False
         
-        # Latest L2 Snapshots: { "BTC/USD": { "bids": [...], "asks": [...], "vbi": 0.0 } }
+        # Latest L2 Snapshots: { "BTCUSDT": { "bids": [...], "asks": [...], "vbi": 0.0 } }
         self.l2_cache: Dict[str, dict] = {}
         
         # History for Spoofing detection
         self.prev_l2: Dict[str, dict] = {}
-        self.cancel_rate: Dict[str, float] = {} # { "BTC/USD": 0.0 }
+        self.cancel_rate: Dict[str, float] = {} # { "BTCUSDT": 0.0 }
         
     async def start(self, symbols: List[str]):
         """Initialize and run the WebSocket stream."""
         if not self.api_key or not self.secret_key:
-            logger.error("Alpaca keys missing! Cannot start Sensory Hub.")
+            logger.error("Binance keys missing! Cannot start Sensory Hub.")
             return
 
-        self.active_symbols = symbols
-        self.stream = CryptoDataStream(self.api_key, self.secret_key)
+        self.active_symbols = [s.replace("/", "").replace("-", "") for s in symbols]
+        self.client = await AsyncClient.create(self.api_key, self.secret_key)
+        self.bsm = BinanceSocketManager(self.client)
+        self.active = True
         
-        # Subscribe to Order Books
-        for symbol in symbols:
-            # Note: Alpaca-py expects symbols like BTC/USD or BTC/USDT depending on the provider
-            # We will use the provided symbols directly
-            self.stream.subscribe_crypto_orderbooks(self._on_orderbook, symbol)
-            logger.info(f"📡 Sensory Hub: Subscribed to Order Book for {symbol}")
-
         # Run in background
-        asyncio.create_task(self.stream._run_forever())
+        asyncio.create_task(self._stream_manager())
 
-    async def _on_orderbook(self, data: Orderbook):
+    async def _stream_manager(self):
+        """Manages the Multiplex depth stream."""
+        # Binance format for depth: <symbol>@depth20@100ms
+        streams = [f"{sym.lower()}@depth20@100ms" for sym in self.active_symbols]
+        for sym in self.active_symbols:
+            logger.info(f"📡 Sensory Hub: Subscribed to Order Book for {sym}")
+            
+        while self.active:
+            try:
+                async with self.bsm.multiplex_socket(streams) as stream:
+                    while self.active:
+                        res = await stream.recv()
+                        if 'data' in res:
+                            await self._on_orderbook(res['data'])
+            except Exception as e:
+                logger.error(f"WebSocket Error (Sensory Hub): {e}. Reconnecting...")
+                await asyncio.sleep(5)
+
+    async def _on_orderbook(self, data: dict):
         """Callback for incoming orderbook updates."""
-        symbol = data.symbol
+        # Binance depth payload structure
+        # 'bids': [ [ "Price", "Qty" ], ... ]
+        symbol = data.get('s', '').upper()
+        if not symbol: return
         
         # Process top 10 levels
-        bids = data.bids[:10]
-        asks = data.asks[:10]
+        bids = data.get('bids', [])[:10]
+        asks = data.get('asks', [])[:10]
         
         # Calculate VBI (Volume Book Imbalance)
         # VBI = (BidVol - AskVol) / (BidVol + AskVol)
-        bid_vol = sum(b.size for b in bids)
-        ask_vol = sum(a.size for a in asks)
-        vbi = (bid_vol - ask_vol) / (bid_vol + ask_vol + 1e-10)
-        
+        try:
+             bid_vol = sum(float(b[1]) for b in bids)
+             ask_vol = sum(float(a[1]) for a in asks)
+             vbi = (bid_vol - ask_vol) / (bid_vol + ask_vol + 1e-10)
+        except Exception:
+             vbi = 0.0
+             
         # Update Cancel Rate (Spoofing Proxy)
-        self._update_cancel_rate(symbol, bids, asks)
+        # Parse bids into {price: qty} floats
+        float_bids = [(float(b[0]), float(b[1])) for b in bids]
+        float_asks = [(float(a[0]), float(a[1])) for a in asks]
+        
+        self._update_cancel_rate(symbol, float_bids, float_asks)
         
         # Store in cache
         self.l2_cache[symbol] = {
-            "bids": [[b.price, b.size] for b in bids],
-            "asks": [[a.price, a.size] for a in asks],
+            "bids": float_bids,
+            "asks": float_asks,
             "vbi": vbi,
             "cancel_rate": self.cancel_rate.get(symbol, 0.0),
-            "timestamp": data.timestamp
+            "timestamp": data.get('E', 0)
         }
         
         # Backup for next diff
         self.prev_l2[symbol] = {
-            "bids": {b.price: b.size for b in bids},
-            "asks": {a.price: a.size for a in asks}
+            "bids": {b[0]: b[1] for b in float_bids},
+            "asks": {a[0]: a[1] for a in float_asks}
         }
         
         # Optional: Log anomaly if VBI is extreme (Spoofing/Manipulation detection)
         if abs(vbi) > 0.8:
-            logger.warning(f"⚠️ Extreme Order Book Imbalance on {symbol}: {vbi:.2f}")
+            pass # logger.warning(f"⚠️ Extreme Order Book Imbalance on {symbol}: {vbi:.2f}")
 
-    def _update_cancel_rate(self, symbol: str, bids: List, asks: List):
+    def _update_cancel_rate(self, symbol: str, bids: List[tuple], asks: List[tuple]):
         """Estimate cancellation rates by comparing level volume shifts."""
         if symbol not in self.prev_l2:
             return
             
         prev = self.prev_l2[symbol]
-        curr_bids = {b.price: b.size for b in bids}
-        curr_asks = {a.price: a.size for a in asks}
+        curr_bids = {b[0]: b[1] for b in bids}
+        curr_asks = {a[0]: a[1] for a in asks}
         
         cancels = 0.0
         total_delta = 0.0
@@ -121,7 +144,10 @@ class AlpacaSensoryHub:
         Returns a normalized sensory vector for the model.
         Dimensions: 10 Bids (P, S) + 10 Asks (P, S) + VBI + CancelRate = 42 features.
         """
-        data = self.l2_cache.get(symbol)
+        # Engine might ask for BTC/USD format, map it internally
+        binance_symbol = symbol.replace("/", "").replace("-", "").upper()
+            
+        data = self.l2_cache.get(binance_symbol)
         if not data:
             return None
             
@@ -157,9 +183,10 @@ class AlpacaSensoryHub:
         return np.array(vector, dtype=np.float32)
 
     async def stop(self):
-        if self.stream:
-            await self.stream.stop()
-            logger.info("📡 Sensory Hub Stopped")
+        self.active = False
+        if self.client:
+           await self.client.close_connection()
+        logger.info("📡 Sensory Hub Stopped")
 
 # Singleton (or initialized in MarketDataService)
 sensory_hub = None # Initialized after keys are available
