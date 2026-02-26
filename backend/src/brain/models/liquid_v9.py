@@ -51,10 +51,10 @@ class CrossAttentionFusion(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        attn_out, _ = self.attention(x, x, x, need_weights=False)
+    def forward(self, x: torch.Tensor, need_weights: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        attn_out, attn_weights = self.attention(x, x, x, need_weights=need_weights)
         x = self.norm(x + self.dropout(attn_out))
-        return x
+        return x, attn_weights
 
 
 class ConsensusFusion(nn.Module):
@@ -91,10 +91,11 @@ class ConsensusFusion(nn.Module):
     def forward(
         self, 
         embeddings: torch.Tensor, 
-        logits: torch.Tensor
-    ) -> torch.Tensor:
+        logits: torch.Tensor,
+        need_weights: bool = False
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         batch_size = embeddings.size(0)
-        attended = self.cross_attn(embeddings)
+        attended, attn_weights = self.cross_attn(embeddings, need_weights=need_weights)
         
         probs = F.softmax(logits, dim=-1)
         confidence = self.confidence_proj(probs)
@@ -108,7 +109,7 @@ class ConsensusFusion(nn.Module):
         combined = torch.cat([flat_emb, flat_conf], dim=-1)
         context = self.fusion(combined)
         
-        return context
+        return context, attn_weights, confidence
 
 
 class SwarmCoordinator(nn.Module):
@@ -174,10 +175,11 @@ class SwarmCoordinator(nn.Module):
         embeddings: torch.Tensor, 
         worker_logits: torch.Tensor,
         dt: Optional[torch.Tensor] = None,
-        hx: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # 1. Fuse worker outputs
-        context = self.fusion(embeddings, worker_logits)
+        hx: Optional[torch.Tensor] = None,
+        compute_telemetry: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        # 1. Fuse worker outputs (now returns attention weights and confidence scores)
+        context, attn_weights, confidence = self.fusion(embeddings, worker_logits, need_weights=compute_telemetry)
         
         # 2. Refine through CfC
         context_seq = context.unsqueeze(1)
@@ -185,8 +187,6 @@ class SwarmCoordinator(nn.Module):
         
         # 3. Macro Fusion (Fuse micro execution with macro trend)
         if hasattr(self, 'macro_bias') and self.macro_bias is not None:
-            # macro_bias is injected from SwarmBrain [B, Dim]
-            # h_refined is the hidden state [B, hidden_dim]
             h_refined = self.macro_fusion(torch.cat([h_refined, self.macro_bias], dim=-1))
             h_refined = F.silu(h_refined)
             
@@ -194,13 +194,13 @@ class SwarmCoordinator(nn.Module):
         long_score = self.long_expert(h_refined)
         short_score = self.short_expert(h_refined)
         
-        # 4. Policy logits
+        # 5. Policy logits
         policy_logits = self.policy_head(h_refined)
         
-        # 5. Differential logit for backward compatibility
+        # 6. Differential logit for backward compatibility
         diff_logit = long_score - short_score
         
-        return policy_logits, diff_logit, long_score, short_score
+        return policy_logits, diff_logit, long_score, short_score, attn_weights, confidence
 
 
 class SwarmBrain(nn.Module):
@@ -240,16 +240,14 @@ class SwarmBrain(nn.Module):
     def forward(
         self, 
         x_dict: dict,
-        hx: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        hx: Optional[torch.Tensor] = None,
+        compute_telemetry: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         # 0. Process Macro Context (if provided, else dummy)
-        # H1 is typically present in training (from _simulate_timeframes)
-        # In live inference, we'll need to pass it explicitly in x_dict
         x_macro_h1 = x_dict.get("H1")
         if x_macro_h1 is not None and len(x_macro_h1.shape) == 3:
-            macro_feat = self.macro_encoder(x_macro_h1) # [B, L, Dim]
-            # Global macro state (average over the H1 sequence)
-            self.coordinator.macro_bias = macro_feat.mean(dim=1) # [B, Dim]
+            macro_feat = self.macro_encoder(x_macro_h1)
+            self.coordinator.macro_bias = macro_feat.mean(dim=1)
         else:
             self.coordinator.macro_bias = None
 
@@ -258,12 +256,12 @@ class SwarmBrain(nn.Module):
         
         # 2. Coordinate and decide
         coord_dt = x_dict.get("coord_dt")
-        policy_logits, diff_logit, long_score, short_score = self.coordinator(
-            embeddings, worker_logits, coord_dt, hx
+        policy_logits, diff_logit, long_score, short_score, attn_weights, confidence = self.coordinator(
+            embeddings, worker_logits, coord_dt, hx, compute_telemetry=compute_telemetry
         )
         
-        # Return policy_logits as the primary decision logit
-        return policy_logits, worker_logits, long_score, short_score
+        # Return policy_logits + micro-state telemetry (attn_weights, confidence)
+        return policy_logits, worker_logits, long_score, short_score, attn_weights, confidence
     
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

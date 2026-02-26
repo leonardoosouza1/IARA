@@ -36,6 +36,17 @@ import {
   Brush,
 } from "recharts";
 
+interface MicroState {
+  worker_thoughts?: number[][]; // [5, 3] probabilities for each worker
+  attention_weights?: number[][]; // [5, 5] cross-attention matrix
+  consensus_weights?: number[]; // MoE expert utilization
+  coordinator_policy?: number[]; // [3] probabilities: Long, Short, Wait
+  confidence_scores?: number[]; // [5] per-worker confidence
+  pressure?: number;
+  trauma_buffer_size?: number;
+  learning_rate?: number;
+}
+
 interface TrainingStatus {
   is_training: boolean;
   last_loss: number | null;
@@ -47,6 +58,7 @@ interface TrainingStatus {
   progress: number;
   logs: string[];
   history?: MetricPoint[];
+  micro_state?: MicroState;
 }
 
 interface DataStatus {
@@ -340,7 +352,7 @@ export default function BrainLabPage() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 5000);
+    const interval = setInterval(fetchData, 1000);
     return () => clearInterval(interval);
   }, [fetchData]);
 
@@ -766,64 +778,312 @@ export default function BrainLabPage() {
                 )}
               </div>
 
-              {/* Swarm Insight (Macro/Micro) */}
-              <div className="w-64 bg-zinc-950/40 border border-zinc-800 rounded-lg p-4 flex flex-col items-center justify-center space-y-4">
-                <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest text-center">
-                  Swarm Thoughts
+              {/* 🧠 Opened Brain — Micro-State Visualization */}
+              <div className="w-80 bg-zinc-950/60 border border-zinc-800 rounded-lg p-4 flex flex-col gap-3 overflow-y-auto [scrollbar-width:none]">
+                <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest text-center">
+                  🧠 Opened Brain
                 </p>
-                <div className="flex flex-col gap-2 w-full">
-                  {["M5", "M15", "M30", "H1", "H4"].map((tf, i) => {
-                    // Extract last vote from logs if available
-                    const lastLog =
-                      trainingStatus?.logs[trainingStatus.logs.length - 1] ||
-                      "";
-                    const swarmMatch = lastLog.match(/Swarm: ([L|S|W-]+)/);
-                    const votes = swarmMatch
-                      ? swarmMatch[1].split("-")
-                      : ["W", "W", "W", "W", "W"];
-                    const vote = votes[i] || "W";
 
-                    return (
-                      <div
-                        key={tf}
-                        className="flex items-center justify-between bg-black/20 px-3 py-1.5 rounded border border-zinc-800/50"
-                      >
-                        <span className="text-[10px] font-bold text-zinc-500">
-                          {tf} Specialist
-                        </span>
-                        <Badge
-                          className={cn(
-                            "text-[9px] px-1.5 h-4 border-none",
-                            vote === "L"
-                              ? "bg-emerald-500/20 text-emerald-400"
-                              : vote === "S"
-                                ? "bg-rose-500/20 text-rose-400"
-                                : "bg-zinc-800 text-zinc-500",
-                          )}
+                {/* --- Cross-Attention Heatmap --- */}
+                {trainingStatus?.micro_state?.attention_weights ? (
+                  <div>
+                    <p className="text-[8px] uppercase text-zinc-600 font-bold mb-1.5 tracking-wider">
+                      Cross-Attention (Who Talks to Whom)
+                    </p>
+                    <div className="grid grid-cols-6 gap-px text-[7px] font-mono">
+                      {/* Column Headers */}
+                      <div />
+                      {["M5", "M15", "M30", "H1", "H4"].map((tf) => (
+                        <div
+                          key={tf}
+                          className="text-center text-zinc-500 font-bold"
                         >
-                          {vote === "L"
-                            ? "LONG"
-                            : vote === "S"
-                              ? "SHORT"
-                              : "WAIT"}
-                        </Badge>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="pt-2 border-t border-zinc-800 w-full text-center">
-                  <p className="text-[9px] text-zinc-600 italic">
-                    Coordinator Confidence
-                  </p>
-                  <div className="mt-1 h-1 w-full bg-zinc-900 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-indigo-500"
-                      style={{
-                        width: `${(trainingStatus?.last_acc || 0) * 100}%`,
-                      }}
-                    />
+                          {tf}
+                        </div>
+                      ))}
+                      {/* Rows */}
+                      {trainingStatus.micro_state.attention_weights.map(
+                        (row, ri) => (
+                          <>
+                            <div
+                              key={`label-${ri}`}
+                              className="text-zinc-500 font-bold text-right pr-1"
+                            >
+                              {["M5", "M15", "M30", "H1", "H4"][ri]}
+                            </div>
+                            {row.map((val, ci) => {
+                              const intensity = Math.min(1, Math.max(0, val));
+                              const isStrong = intensity > 0.3;
+                              return (
+                                <div
+                                  key={`${ri}-${ci}`}
+                                  className={cn(
+                                    "aspect-square rounded-sm flex items-center justify-center transition-all duration-300",
+                                    isStrong && "animate-pulse",
+                                  )}
+                                  style={{
+                                    backgroundColor: `rgba(99, 102, 241, ${intensity})`,
+                                  }}
+                                  title={`${["M5", "M15", "M30", "H1", "H4"][ri]} → ${["M5", "M15", "M30", "H1", "H4"][ci]}: ${(val * 100).toFixed(1)}%`}
+                                >
+                                  <span
+                                    className={cn(
+                                      "text-[6px]",
+                                      intensity > 0.5
+                                        ? "text-white"
+                                        : "text-zinc-600",
+                                    )}
+                                  >
+                                    {(val * 100).toFixed(0)}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </>
+                        ),
+                      )}
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="text-[8px] text-zinc-700 italic text-center py-2">
+                    Attention matrix awaiting training...
+                  </div>
+                )}
+
+                {/* --- Expert Utilization (Worker Thoughts) --- */}
+                {trainingStatus?.micro_state?.worker_thoughts ? (
+                  <div>
+                    <p className="text-[8px] uppercase text-zinc-600 font-bold mb-1 tracking-wider">
+                      Expert Predictions
+                    </p>
+                    <div className="space-y-1">
+                      {trainingStatus.micro_state.worker_thoughts.map(
+                        (probs, idx) => {
+                          const names = ["M5", "M15", "M30", "H1", "H4"];
+                          const labels = ["Long", "Short", "Wait"];
+                          const colors = [
+                            "bg-emerald-500",
+                            "bg-rose-500",
+                            "bg-zinc-600",
+                          ];
+                          const maxIdx = probs.indexOf(Math.max(...probs));
+                          const conf =
+                            trainingStatus.micro_state?.confidence_scores?.[
+                              idx
+                            ];
+
+                          return (
+                            <div
+                              key={idx}
+                              className="flex items-center gap-1.5"
+                            >
+                              <span className="text-[8px] font-bold text-zinc-400 w-6 text-right">
+                                {names[idx]}
+                              </span>
+                              {/* Stacked probability bar */}
+                              <div className="flex-1 h-3 flex rounded-sm overflow-hidden">
+                                {probs.map((p, pi) => (
+                                  <div
+                                    key={pi}
+                                    className={cn(
+                                      colors[pi],
+                                      "transition-all duration-500",
+                                      pi === maxIdx && "brightness-125",
+                                    )}
+                                    style={{ width: `${p * 100}%` }}
+                                    title={`${labels[pi]}: ${(p * 100).toFixed(1)}%`}
+                                  />
+                                ))}
+                              </div>
+                              {/* Confidence indicator */}
+                              {conf !== undefined && (
+                                <div
+                                  className={cn(
+                                    "w-2 h-2 rounded-full transition-all duration-500",
+                                    conf > 0.6
+                                      ? "bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.6)]"
+                                      : conf > 0.4
+                                        ? "bg-amber-400 shadow-[0_0_4px_rgba(251,191,36,0.4)]"
+                                        : "bg-zinc-600",
+                                  )}
+                                  title={`Confidence: ${(conf * 100).toFixed(0)}%`}
+                                />
+                              )}
+                            </div>
+                          );
+                        },
+                      )}
+                      {/* Legend */}
+                      <div className="flex gap-3 justify-center pt-1">
+                        {["Long", "Short", "Wait"].map((label, i) => (
+                          <div key={label} className="flex items-center gap-1">
+                            <div
+                              className={cn(
+                                "w-1.5 h-1.5 rounded-full",
+                                i === 0
+                                  ? "bg-emerald-500"
+                                  : i === 1
+                                    ? "bg-rose-500"
+                                    : "bg-zinc-600",
+                              )}
+                            />
+                            <span className="text-[7px] text-zinc-500">
+                              {label}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {["M5", "M15", "M30", "H1", "H4"].map((tf, i) => {
+                      const lastLog =
+                        trainingStatus?.logs[trainingStatus.logs.length - 1] ||
+                        "";
+                      const swarmMatch = lastLog.match(/Swarm: ([L|S|W-]+)/);
+                      const votes = swarmMatch
+                        ? swarmMatch[1].split("-")
+                        : ["W", "W", "W", "W", "W"];
+                      const vote = votes[i] || "W";
+                      return (
+                        <div
+                          key={tf}
+                          className="flex items-center justify-between bg-black/20 px-3 py-1 rounded border border-zinc-800/50"
+                        >
+                          <span className="text-[9px] font-bold text-zinc-500">
+                            {tf}
+                          </span>
+                          <Badge
+                            className={cn(
+                              "text-[8px] px-1.5 h-4 border-none",
+                              vote === "L"
+                                ? "bg-emerald-500/20 text-emerald-400"
+                                : vote === "S"
+                                  ? "bg-rose-500/20 text-rose-400"
+                                  : "bg-zinc-800 text-zinc-500",
+                            )}
+                          >
+                            {vote === "L"
+                              ? "LONG"
+                              : vote === "S"
+                                ? "SHORT"
+                                : "WAIT"}
+                          </Badge>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* --- Coordinator Decision --- */}
+                {trainingStatus?.micro_state?.coordinator_policy ? (
+                  <div>
+                    <p className="text-[8px] uppercase text-zinc-600 font-bold mb-1 tracking-wider">
+                      Coordinator Decision
+                    </p>
+                    <div className="flex items-center gap-2">
+                      {["Long", "Short", "Wait"].map((label, i) => {
+                        const p =
+                          trainingStatus.micro_state!.coordinator_policy![i];
+                        const isMax =
+                          p ===
+                          Math.max(
+                            ...trainingStatus.micro_state!.coordinator_policy!,
+                          );
+                        return (
+                          <div key={label} className="flex-1 text-center">
+                            <div
+                              className={cn(
+                                "rounded-md py-1 text-[10px] font-black transition-all duration-500",
+                                isMax
+                                  ? i === 0
+                                    ? "bg-emerald-500/30 text-emerald-300 shadow-[0_0_8px_rgba(52,211,153,0.3)]"
+                                    : i === 1
+                                      ? "bg-rose-500/30 text-rose-300 shadow-[0_0_8px_rgba(244,63,94,0.3)]"
+                                      : "bg-zinc-700/30 text-zinc-300"
+                                  : "bg-zinc-900 text-zinc-600",
+                              )}
+                            >
+                              {(p * 100).toFixed(1)}%
+                            </div>
+                            <p
+                              className={cn(
+                                "text-[7px] mt-0.5",
+                                isMax ? "text-zinc-400" : "text-zinc-600",
+                              )}
+                            >
+                              {label}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="pt-1 border-t border-zinc-800 w-full text-center">
+                    <p className="text-[9px] text-zinc-600 italic">
+                      Coordinator Confidence
+                    </p>
+                    <div className="mt-1 h-1 w-full bg-zinc-900 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-indigo-500"
+                        style={{
+                          width: `${(trainingStatus?.last_acc || 0) * 100}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* --- Pressure & Trauma Gauge --- */}
+                {trainingStatus?.micro_state?.pressure !== undefined && (
+                  <div className="border-t border-zinc-800/50 pt-2 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[8px] text-zinc-500 font-bold uppercase">
+                        Pressure
+                      </span>
+                      <span
+                        className={cn(
+                          "text-[9px] font-mono font-black",
+                          trainingStatus.micro_state.pressure! > 1
+                            ? "text-rose-400"
+                            : trainingStatus.micro_state.pressure! > 0.5
+                              ? "text-amber-400"
+                              : "text-zinc-500",
+                        )}
+                      >
+                        {trainingStatus.micro_state.pressure!.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="h-1 w-full bg-zinc-900 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-emerald-500 via-amber-500 to-rose-500 transition-all duration-500"
+                        style={{
+                          width: `${Math.min(100, trainingStatus.micro_state.pressure! * 50)}%`,
+                        }}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[8px] text-zinc-500 font-bold uppercase">
+                        Trauma Buffer
+                      </span>
+                      <span className="text-[9px] font-mono text-purple-400">
+                        {trainingStatus.micro_state.trauma_buffer_size ?? 0}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[8px] text-zinc-500 font-bold uppercase">
+                        Learning Rate
+                      </span>
+                      <span className="text-[9px] font-mono text-indigo-400">
+                        {trainingStatus.micro_state.learning_rate?.toExponential(
+                          2,
+                        ) ?? "—"}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 

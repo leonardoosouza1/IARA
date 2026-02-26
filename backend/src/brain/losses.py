@@ -103,10 +103,12 @@ class WorkerAuxiliaryLoss(nn.Module):
     Uses label smoothing for regularization.
     """
     
-    def __init__(self, num_classes: int = 2, label_smoothing: float = 0.1):
+    def __init__(self, num_classes: int = 2, label_smoothing: float = 0.1, weight_fp: float = 10.0, weight_fn: float = 1.0):
         super().__init__()
         self.num_classes = num_classes
         self.label_smoothing = label_smoothing
+        # weights: [Long, Short, Wait] -> Target 2 is Wait (minority class)
+        self.weights = torch.tensor([weight_fn, weight_fn, weight_fp], dtype=torch.float32)
         
     def forward(
         self, 
@@ -121,6 +123,9 @@ class WorkerAuxiliaryLoss(nn.Module):
         Returns:
             Average auxiliary loss across all workers
         """
+        if self.weights.device != worker_logits.device:
+            self.weights = self.weights.to(worker_logits.device)
+            
         batch_size, num_workers, num_classes = worker_logits.shape
         
         total_loss = torch.tensor(0.0, device=targets.device)
@@ -130,6 +135,7 @@ class WorkerAuxiliaryLoss(nn.Module):
             loss = F.cross_entropy(
                 w_logits, 
                 targets,
+                weight=self.weights,
                 label_smoothing=self.label_smoothing
             )
             total_loss = total_loss + loss
@@ -217,7 +223,7 @@ class AsymmetricCrossEntropyLoss(nn.Module):
         weight_fn: Weight penalty when target is Action (class 0 or 1)
         label_smoothing: CrossEntropy label smoothing
     """
-    def __init__(self, weight_fp: float = 3.0, weight_fn: float = 1.0, label_smoothing: float = 0.1):
+    def __init__(self, weight_fp: float = 10.0, weight_fn: float = 1.0, label_smoothing: float = 0.1):
         super().__init__()
         # weights: [Long, Short, Wait] -> Target 2 is Wait
         self.weights = torch.tensor([weight_fn, weight_fn, weight_fp], dtype=torch.float32)
@@ -271,11 +277,13 @@ class SwarmLoss(nn.Module):
         self.weight_logits = nn.Parameter(torch.tensor([2.5, 0.0, 0.0]))
         
         # Sub-losses (Sniper Mode Asymmetric Loss)
-        self.coord_loss = AsymmetricCrossEntropyLoss(weight_fp=3.0, weight_fn=1.0, label_smoothing=label_smoothing)
+        self.coord_loss = AsymmetricCrossEntropyLoss(weight_fp=10.0, weight_fn=1.0, label_smoothing=label_smoothing)
         self.focal_alt = AsymmetricFocalLoss(alpha=alpha, gamma=gamma) # Still keep for binary auxiliary if needed
         self.worker_loss = WorkerAuxiliaryLoss(
             num_classes=3, 
-            label_smoothing=label_smoothing
+            label_smoothing=label_smoothing,
+            weight_fp=10.0,
+            weight_fn=1.0
         )
         self.consensus_loss = ConsensusLoss()
         self.diversity_weight = diversity_weight
@@ -309,10 +317,12 @@ class SwarmLoss(nn.Module):
         # This prevents the weight from falling to zero if other tasks are "easier"
         coord_weight = 0.5 * weights[0] + 0.3 # At least 30%, up to 80%
         
-        # Total Weighted Loss
+        # 4. Total Weighted Loss
+        # FIX: Include l_workers to allow gradients to flow to weight_logits[1]
         total_l = (
             coord_weight * l_coord + 
-            weights[2] * l_consensus * 0.1 # Weight consensus but don't let it dominate
+            weights[1] * l_workers * 0.5 + 
+            weights[2] * l_consensus * 0.1
         )
         
         # 4. Weight Entropy Penalty (🌋 Phase 19)
@@ -339,15 +349,14 @@ if __name__ == "__main__":
     num_workers = 5
     
     # Simulate outputs
-    coord_logits = torch.randn(batch_size, 1)
+    coord_logits = torch.randn(batch_size, 3)
     worker_logits = torch.randn(batch_size, num_workers, 3)
-    targets = torch.randint(0, 2, (batch_size,)).float()
+    targets = torch.randint(0, 3, (batch_size,)).float()
     
     # Create loss
     criterion = SwarmLoss(
         alpha=0.75,
         gamma=2.0,
-        aux_weight=0.4,
         consensus_weight=0.1,
         label_smoothing=0.1
     )

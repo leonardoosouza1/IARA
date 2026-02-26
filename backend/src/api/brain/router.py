@@ -41,6 +41,7 @@ training_state = {
     "all_logs": [], # Full history for export
     "stop_requested": False,
     "current_epoch": 1,
+    "micro_state": {},  # 🧠 Phase 20: Real-time internal brain state for "Opened Brain" dashboard
 }
 
 # In-memory data fetching status
@@ -77,6 +78,7 @@ def run_training_background(protocol: Dict[str, Any]):
         training_state["all_logs"] = []
         training_state["history"] = []
         training_state["stop_requested"] = False
+        training_state["micro_state"] = {}
         training_state["message"] = f"Initializing {protocol['mode']} protocol..."
         
         def log_callback(msg: str):
@@ -154,6 +156,12 @@ def run_training_background(protocol: Dict[str, Any]):
 
         learner = ContinuousLearner(checkpoint_path=checkpoint_path)
         learner.checkpoint_path = save_path # Override where it saves
+        
+        # 🧠 Phase 20: Wire Micro-State Callback
+        def micro_state_callback(state: dict):
+            training_state["micro_state"] = state
+        learner._micro_state_callback = micro_state_callback
+        
         log_callback(f"Compute device detected: {learner.device}")
         log_callback(f"Target Save Location: {save_name}")
         

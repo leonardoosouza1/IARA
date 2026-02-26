@@ -250,7 +250,7 @@ class SignalEngine:
                 with torch.amp.autocast(
                     str(self.device), enabled=(self.device.type == "cuda")
                 ):
-                    logits, worker_logits, long_score, short_score = self.model(
+                    logits, worker_logits, long_score, short_score, _, _ = self.model(
                         x_dict
                     )
 

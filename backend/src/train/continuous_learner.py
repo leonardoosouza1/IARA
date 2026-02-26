@@ -64,8 +64,19 @@ class ContinuousLearner:
         self.batch_size = 256
         self.learning_rate = 1e-4
         
+        # 🚀 Phase 11: SwarmLoss with Dynamic Weighting
+        self.criterion = SwarmLoss(alpha=0.75, gamma=2.0, consensus_weight=0.1).to(self.device)
+
+        import itertools
         self.model = self._load_model()
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
+        
+        # 🚀 Phase 11 & 19: Separate learning rates for Model and Meta-Weights
+        # Swarm Weights (logits) need a much higher LR to adapt quickly (1e-2 vs 1e-4)
+        optimizer_grouped_parameters = [
+            {"params": self.model.parameters(), "lr": self.learning_rate},
+            {"params": self.criterion.parameters(), "lr": 1e-2}
+        ]
+        self.optimizer = torch.optim.AdamW(optimizer_grouped_parameters)
         
         # 🚀 Phase 14: Learning Rate Scheduler & Trauma Buffer
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=2)
@@ -73,8 +84,6 @@ class ContinuousLearner:
         self.trauma_buffer_Y = []
         self.trauma_threshold = 2.5 # Minimum loss to be considered a 'Trauma'
         
-        # 🚀 Phase 11: SwarmLoss with Dynamic Weighting
-        self.criterion = SwarmLoss(alpha=0.75, gamma=2.0, consensus_weight=0.1).to(self.device)
         self.scaler = torch.amp.GradScaler('cuda', enabled=self._use_grad_scaler())
 
         # 🚀 Phase 13: Adversarial Components
@@ -271,7 +280,7 @@ class ContinuousLearner:
             x_dict = self._simulate_timeframes(batch_X)
             
             with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
-                logits, worker_logits, _, _ = self.model(x_dict)
+                logits, worker_logits, _, _, attn_w, confidence = self.model(x_dict)
                 loss_dict = self.criterion(logits, worker_logits, batch_y)
                 loss = loss_dict["total"]
                 
@@ -321,6 +330,11 @@ class ContinuousLearner:
             epoch_loss = 0.0
             batch_count = 0
             
+            # 🧠 Phase 20: Epoch-level accumulators for robust AUC
+            epoch_all_preds = []
+            epoch_all_labels = []
+            epoch_all_probs = []
+            
             for i in range(0, total_samples, self.batch_size):
                 # Check for stop request
                 if stop_check and stop_check():
@@ -360,7 +374,7 @@ class ContinuousLearner:
                 x_dict = self._simulate_timeframes(batch_X)
                 
                 with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
-                    logits, worker_logits, _, _ = self.model(x_dict)
+                    logits, worker_logits, _, _, _, _ = self.model(x_dict)
                     
                     # 🚀 Phase 11: Swarm v9.7 Targets {0: Long, 1: Short, 2: Wait}
                     # 🎯 Phase 3: High Precision (Sniper Mode) - Asymmetry handled directly by SwarmLoss
@@ -385,7 +399,7 @@ class ContinuousLearner:
                     batch_X_adv, _ = self.challenger(batch_X_orig, pressure=current_pressure)
                     x_dict_adv = self._simulate_timeframes(batch_X_adv)
                     with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
-                        logits_adv, _, _, _ = self.model(x_dict_adv)
+                        logits_adv, _, _, _, _, _ = self.model(x_dict_adv)
                         loss_adv_dict = self.criterion(logits_adv, worker_logits, batch_y) # worker_logits reuse
                         challenger_loss = -loss_adv_dict["total"]
                     self.scaler.scale(challenger_loss).backward()
@@ -413,23 +427,37 @@ class ContinuousLearner:
                     prec = precision_score(true_y, preds, average='macro', zero_division=0)
                     f1 = f1_score(true_y, preds, average='macro', zero_division=0)
                     
-                    # AUC requires probabilities
+                    # 🧠 Phase 20: Accumulate for epoch-level AUC
                     probs = torch.softmax(logits.detach(), dim=-1).cpu().numpy()
+                    epoch_all_preds.append(preds)
+                    epoch_all_labels.append(true_y)
+                    epoch_all_probs.append(probs)
                     
-                    import numpy as np
-                    import warnings
-                    try:
-                        # 🚀 Phase 18: Class Diversity Safeguard
-                        unique_classes = np.unique(true_y)
-                        if len(unique_classes) > 1:
-                            with warnings.catch_warnings():
-                                warnings.simplefilter("ignore")
-                                # OVR (One-vs-Rest) AUC for multi-class with explicit labels to avoid failure on missing classes
-                                auc = roc_auc_score(true_y, probs, multi_class='ovr', average='macro', labels=[0, 1, 2])
-                        else:
-                            auc = 0.5 # Default for single-class batches
-                    except Exception:
-                        auc = 0.5
+                    # Compute running AUC from accumulated data (use only present classes)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        try:
+                            all_labels_so_far = np.concatenate(epoch_all_labels)
+                            all_probs_so_far = np.concatenate(epoch_all_probs)
+                            present_classes = np.unique(all_labels_so_far).astype(int).tolist()
+                            if len(present_classes) == 3:
+                                # Force strict normalization to exactly 1.0 to avoid scikit-learn float32 precision crash
+                                norm_probs = all_probs_so_far / all_probs_so_far.sum(axis=1, keepdims=True)
+                                auc = roc_auc_score(all_labels_so_far, norm_probs, multi_class='ovr', average='macro', labels=[0, 1, 2])
+                            elif len(present_classes) == 2:
+                                # Binary classification fallback
+                                pos_class = present_classes[1]
+                                binary_probs = all_probs_so_far[:, present_classes]
+                                binary_probs = binary_probs / binary_probs.sum(axis=1, keepdims=True)
+                                auc = roc_auc_score(all_labels_so_far, binary_probs[:, 1], labels=present_classes)
+                            else:
+                                auc = 0.5
+                                
+                            if np.isnan(auc):
+                                auc = 0.5
+                        except Exception as e:
+                            logger.error(f"AUC Error A: {e}") 
+                            auc = 0.5
                 
                 epoch_loss += loss.item()
                 batch_count += 1
@@ -445,6 +473,28 @@ class ContinuousLearner:
                     thought_str = "-".join([v_map[v] for v in exp_votes])
                     
                     callback(f"Epoch {epoch+1} | B {batch_count} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | Pressure: {is_adversarial * current_pressure:.2f} | {progress}%")
+                    
+                    # 🧠 Phase 20: Micro-State Telemetry for "Opened Brain" Dashboard
+                    if hasattr(self, '_micro_state_callback') and self._micro_state_callback:
+                        try:
+                            with torch.no_grad():
+                                _, _, _, _, attn_w, confidence = self.model(x_dict, compute_telemetry=True)
+                                w_probs = torch.softmax(worker_logits[0], dim=-1).cpu().tolist()
+                                c_policy = torch.softmax(logits[0], dim=-1).cpu().tolist()
+                                a_weights = attn_w[0].cpu().tolist() if attn_w is not None else None
+                                conf_scores = confidence[0].squeeze(-1).cpu().tolist() if confidence is not None else None
+                            self._micro_state_callback({
+                                "worker_thoughts": w_probs,
+                                "attention_weights": a_weights,
+                                "consensus_weights": [float(w) for w in loss_dict["weights"]],
+                                "coordinator_policy": c_policy,
+                                "confidence_scores": conf_scores,
+                                "pressure": float(is_adversarial * current_pressure),
+                                "trauma_buffer_size": len(self.trauma_buffer_X),
+                                "learning_rate": float(self.optimizer.param_groups[0]['lr']),
+                            })
+                        except Exception:
+                            pass
             
             if batch_count > 0:
                 avg_loss = epoch_loss / batch_count
@@ -517,195 +567,226 @@ class ContinuousLearner:
                 break
             epoch_loss = 0.0
             epoch_batches = 0
-            shard_count = 0
+            
+            # 🧠 Phase 20: Consolidate ALL shards into one dataset for maximum GPU utilization
+            all_X_list = []
+            all_y_list = []
             for shard_file in shards:
-                if stopped:
+                shard_path = os.path.join(shard_dir, shard_file)
+                data = torch.load(shard_path, map_location='cpu')
+                X_s = data['X']
+                y_s = data['y']
+                
+                # Robust Dimension Migration
+                shard_dim = X_s.shape[-1]
+                if shard_dim == 12 and self.input_dim > 12:
+                    padding = torch.zeros(X_s.shape[0], X_s.shape[1], self.input_dim - 12, dtype=X_s.dtype)
+                    X_s = torch.cat([X_s, padding], dim=-1)
+                elif shard_dim > self.input_dim:
+                    X_s = X_s[:, :, :self.input_dim]
+                elif shard_dim < self.input_dim:
+                    padding = torch.zeros(X_s.shape[0], X_s.shape[1], self.input_dim - shard_dim, dtype=X_s.dtype)
+                    X_s = torch.cat([X_s, padding], dim=-1)
+                
+                all_X_list.append(X_s)
+                all_y_list.append(y_s)
+            
+            X = torch.cat(all_X_list, dim=0)
+            y = torch.cat(all_y_list, dim=0)
+            del all_X_list, all_y_list
+            
+            if callback and epoch == 0:
+                callback(f"📂 Consolidated {len(shards)} shards → {len(X)} samples in memory")
+            
+            total_epoch_batches = max(1, (len(X) + self.batch_size - 1) // self.batch_size)
+            
+            # 🧠 Phase 20: Epoch-level accumulators for robust AUC
+            epoch_all_preds = []
+            epoch_all_labels = []
+            epoch_all_probs = []
+                
+            for i in range(0, len(X), self.batch_size):
+                # Check for stop request
+                if stop_check and stop_check():
+                    if callback: callback(f"⛔ Stop requested at Epoch {epoch+1}, Batch {epoch_batches+1}. Saving best model...")
+                    stopped = True
                     break
                 
-                shard_path = os.path.join(shard_dir, shard_file)
+                batch_X = X[i : i + self.batch_size].to(self.device)
+                batch_y = y[i : i + self.batch_size].long().to(self.device)
                 
-                # Check shard size for transparency
-                try:
-                    s_data = torch.load(shard_path, map_location='cpu', weights_only=True)
-                    s_X = s_data.get('X')
-                    shard_batches = (len(s_X) + self.batch_size - 1) // self.batch_size if s_X is not None else 0
-                    if callback: callback(f"📂 Loading Shard {shard_count+1}/{len(shards)}: {shard_file} ({shard_batches} batches)...")
-                except Exception:
-                    if callback: callback(f"📂 Loading Shard {shard_count+1}/{len(shards)}: {shard_file}...")
+                # 🛡️ Sync Dimensions
+                if batch_X.shape[-1] > self.input_dim:
+                    batch_X = batch_X[:, :, :self.input_dim]
+                if batch_X.shape[1] > self.seq_len:
+                    batch_X = batch_X[:, -self.seq_len:, :]
                 
-                # 🔥 CRITICAL FIX: Keep large dataset on CPU to prevent OOM
-                data = torch.load(shard_path, map_location='cpu')
-                X = data['X']
-                y = data['y']
+                # 🚀 Phase 11: Feature Sanitization
+                batch_X = torch.nan_to_num(batch_X)
                 
+                # 🚀 Phase 13 & 16: Extreme Warmup Schedule
+                # Ep 1-2: 0%, Ep 3-4: 5%, Ep 5-6: 10%, Ep 7-8: 15%, Ep 9+: 30%
+                adv_schedule = [0.0, 0.0, 0.05, 0.05, 0.10, 0.10, 0.15, 0.15]
+                adv_prob = adv_schedule[epoch] if epoch < len(adv_schedule) else 0.30
                 
-                # 🚀 Robust Dimension Migration (v9 -> v11)
-                # target_dim is self.input_dim (usually 26 or 28)
-                shard_dim = X.shape[-1]
+                # 🚀 Phase 13: Adversarial "Prank" Generation
+                is_adversarial = torch.rand(1).item() < adv_prob
+                current_pressure = self.guard.get_pressure()
                 
-                # If it's the very old legacy (12 features), we pad manually
-                if shard_dim == 12 and self.input_dim > 12:
-                    padding = torch.zeros(X.shape[0], X.shape[1], self.input_dim - 12, dtype=X.dtype, device=X.device)
-                    X = torch.cat([X, padding], dim=-1)
-                else:
-                    # Otherwise, we either slice to fit or pad to fit based on self.input_dim
-                    if shard_dim > self.input_dim:
-                        X = X[:, :, :self.input_dim]
-                    elif shard_dim < self.input_dim:
-                        padding = torch.zeros(X.shape[0], X.shape[1], self.input_dim - shard_dim, dtype=X.dtype, device=X.device)
-                        X = torch.cat([X, padding], dim=-1)
-                
-                num_batches_in_shard = max(1, (len(X) + self.batch_size - 1) // self.batch_size)
-                
-                for i in range(0, len(X), self.batch_size):
-                    # Check for stop request
-                    if stop_check and stop_check():
-                        if callback: callback(f"⛔ Stop requested at Epoch {epoch+1}, Batch {epoch_batches+1}. Saving best model...")
-                        stopped = True
-                        break
+                if is_adversarial:
+                    # Challenger attempts to 'prank' the features to confuse the Trader
+                    self.challenger.eval() # Generator doesn't update its own weights during this pass
+                    batch_X_orig = batch_X.clone()
                     
-                    batch_X = X[i : i + self.batch_size].to(self.device)
-                    batch_y = y[i : i + self.batch_size].long().to(self.device)
-                    
-                    # 🛡️ Sync Dimensions: Slice to model's expected input_dim and seq_len
-                    if batch_X.shape[-1] > self.input_dim:
-                        batch_X = batch_X[:, :, :self.input_dim]
-                    if batch_X.shape[1] > self.seq_len:
-                        batch_X = batch_X[:, -self.seq_len:, :]
-                    
-                    # 🚀 Phase 11: Feature Sanitization
-                    batch_X = torch.nan_to_num(batch_X)
-                    
-                    # 🚀 Phase 13 & 16: Extreme Warmup Schedule
-                    # Ep 1-2: 0%, Ep 3-4: 5%, Ep 5-6: 10%, Ep 7-8: 15%, Ep 9+: 30%
-                    adv_schedule = [0.0, 0.0, 0.05, 0.05, 0.10, 0.10, 0.15, 0.15]
-                    adv_prob = adv_schedule[epoch] if epoch < len(adv_schedule) else 0.30
-                    
-                    # 🚀 Phase 13: Adversarial "Prank" Generation
-                    is_adversarial = torch.rand(1).item() < adv_prob
-                    current_pressure = self.guard.get_pressure()
-                    
-                    if is_adversarial:
-                        # Challenger attempts to 'prank' the features to confuse the Trader
-                        self.challenger.eval() # Generator doesn't update its own weights during this pass
-                        batch_X_orig = batch_X.clone()
+                    # LOG: Feed back the "Sadistic Professor" behavior to the UI
+                    if callback and epoch_batches % 50 == 0:
+                        callback(f"😈 Professor Sádico: Aplicando modo aleatório (Pressão: {current_pressure:.2f})")
                         
-                        # LOG: Feed back the "Sadistic Professor" behavior to the UI
-                        if callback and epoch_batches % 50 == 0:
-                            callback(f"😈 Professor Sádico: Aplicando modo aleatório (Pressão: {current_pressure:.2f})")
-                            
-                        # 🌋 Phase 19: Professor Breathe (Harmonic Oscillation)
-                        # Oscillates pressure between 80% and 120% of current_pressure to prevent static noise adaptive fixation
-                        import math
-                        breathe_factor = 1.0 + 0.2 * math.sin(epoch_batches * 0.1)
-                        dynamic_pressure = current_pressure * breathe_factor
-                        
-                        with torch.no_grad():
-                            batch_X, _ = self.challenger(batch_X, pressure=dynamic_pressure, callback=callback if epoch_batches % 50 == 0 else None)
-                     
-                    self.optimizer.zero_grad()
-                    if is_adversarial:
-                        self.challenger_opt.zero_grad()
+                    # 🌋 Phase 19: Professor Breathe (Harmonic Oscillation)
+                    import math
+                    breathe_factor = 1.0 + 0.2 * math.sin(epoch_batches * 0.1)
+                    dynamic_pressure = current_pressure * breathe_factor
+                    
+                    with torch.no_grad():
+                        batch_X, _ = self.challenger(batch_X, pressure=dynamic_pressure, callback=callback if epoch_batches % 50 == 0 else None)
+                 
+                self.optimizer.zero_grad()
+                if is_adversarial:
+                    self.challenger_opt.zero_grad()
 
-                    x_dict = self._simulate_timeframes(batch_X)
+                x_dict = self._simulate_timeframes(batch_X)
+                
+                with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
+                    logits, worker_logits, _, _, _, _ = self.model(x_dict)
+                    loss_dict = self.criterion(logits, worker_logits, batch_y)
+                    loss = loss_dict["total"]
+
+                if torch.isnan(loss):
+                    continue
+
+                # Phase 14: Populate Trauma Buffer
+                if loss.item() > self.trauma_threshold:
+                    self._add_to_trauma_buffer(batch_X.detach(), batch_y.detach())
+
+                # 1. Trader Backward
+                self.scaler.scale(loss).backward()
+                
+                # 2. Challenger Backward (if needed)
+                if is_adversarial:
+                    self.challenger.train()
+                    for p in self.model.parameters(): p.requires_grad = False
+                    
+                    batch_X_adv, _ = self.challenger(batch_X_orig, pressure=current_pressure)
+                    x_dict_adv = self._simulate_timeframes(batch_X_adv)
                     
                     with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
-                        logits, worker_logits, _, _ = self.model(x_dict)
-                        # Phase 14: Label Smoothing handled inside SwarmLoss (if supported), or we pass smoothed targets
-                        # Currently relying on standard CE. For strict label smoothing, we would need to manually apply it.
-                        loss_dict = self.criterion(logits, worker_logits, batch_y)
-                        loss = loss_dict["total"]
+                        logits_adv, worker_logits_adv, _, _, _, _ = self.model(x_dict_adv)
+                        loss_adv_dict = self.criterion(logits_adv, worker_logits_adv, batch_y)
+                        challenger_loss = -loss_adv_dict["total"] 
+                    
+                    self.scaler.scale(challenger_loss).backward()
+                    for p in self.model.parameters(): p.requires_grad = True
 
-                    if torch.isnan(loss):
-                        continue
-
-                    # Phase 14: Populate Trauma Buffer
-                    if loss.item() > self.trauma_threshold:
-                        self._add_to_trauma_buffer(batch_X.detach(), batch_y.detach())
-
-                    # 1. Trader Backward
-                    self.scaler.scale(loss).backward()
-                    
-                    # 2. Challenger Backward (if needed)
-                    if is_adversarial:
-                        self.challenger.train()
-                        for p in self.model.parameters(): p.requires_grad = False
-                        
-                        batch_X_adv, _ = self.challenger(batch_X_orig, pressure=current_pressure)
-                        x_dict_adv = self._simulate_timeframes(batch_X_adv)
-                        
-                        with torch.amp.autocast('cuda', enabled=(self.device.type == "cuda")):
-                            logits_adv, worker_logits_adv, _, _ = self.model(x_dict_adv)
-                            loss_adv_dict = self.criterion(logits_adv, worker_logits_adv, batch_y)
-                            challenger_loss = -loss_adv_dict["total"] 
-                        
-                        self.scaler.scale(challenger_loss).backward()
-                        for p in self.model.parameters(): p.requires_grad = True
-
-                    # 3. Step Optimizers
-                    self.scaler.unscale_(self.optimizer)
-                    # 🚀 Phase 14: Gradient Clipping (Prevent Exploding Gradients during attacks)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
-                    
-                    self.scaler.step(self.optimizer)
-                    if is_adversarial:
-                        self.scaler.unscale_(self.challenger_opt)
-                        self.scaler.step(self.challenger_opt)
-                        
-                    # 4. Final Scaler Update
-                    self.scaler.update()
-                    
-                    # 🚀 Phase 11 & 14: Multi-Class Metrics (Accuracy, Precision, AUC, F1)
-                    from sklearn.metrics import accuracy_score, precision_score, f1_score, roc_auc_score
-                    with torch.no_grad():
-                        logits_np = logits.detach().cpu().numpy()
-                        preds = logits_np.argmax(axis=-1)
-                        true_y = batch_y.cpu().numpy()
-                        
-                        acc = accuracy_score(true_y, preds)
-                        prec = precision_score(true_y, preds, average='macro', zero_division=0)
-                        f1 = f1_score(true_y, preds, average='macro', zero_division=0)
-                        
-                        # AUC requires probabilities
-                        probs = torch.softmax(logits.detach(), dim=-1).cpu().numpy()
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore")
-                            try:
-                                if len(np.unique(true_y)) > 1:
-                                    # OVR (One-vs-Rest) AUC for multi-class with explicit labels to avoid failure on missing classes
-                                    auc = roc_auc_score(true_y, probs, multi_class='ovr', average='macro', labels=[0, 1, 2])
-                                else:
-                                    auc = 0.5
-                            except Exception:
-                                auc = 0.5 # Default for early training / single class batches
-                        
-                        # Phase 13: "Panic Protection"
-                        # If Professor Sádico is smashing accuracy too hard, we force a slight pressure decay
-                        if is_adversarial and acc < 0.40:
-                            self.guard.pressure = torch.tensor(max(0.1, self.guard.get_pressure() * 0.9), device=self.device)
-                            if callback: callback(f"🛡️ Epoch {epoch+1} | Panic Protection: Reducing Professor pressure to {self.guard.get_pressure():.2f}")
-                    
-                    epoch_loss += loss.item()
-                    epoch_batches += 1
-                    total_batches += 1
-                    
-                    # Report every 5 batches for high-fidelity "Chart Dance"
-                    if callback and epoch_batches % 5 == 0:
-                        progress = int((epoch_batches / total_epoch_batches) * 100)
-                        sw_weights = [f"{w:.2f}" for w in loss_dict["weights"]]
-                        
-                        # Expert "Thoughts" Insight
-                        exp_votes = worker_logits.argmax(dim=-1).cpu().numpy()[0] 
-                        v_map = {0: "L", 1: "S", 2: "W"}
-                        thought_str = "-".join([v_map[v] for v in exp_votes])
-                        
-                        callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | Pressure: {is_adversarial * current_pressure:.2f} | {progress}%")
+                # 3. Step Optimizers
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                 
-                shard_count += 1
+                self.scaler.step(self.optimizer)
+                if is_adversarial:
+                    self.scaler.unscale_(self.challenger_opt)
+                    self.scaler.step(self.challenger_opt)
+                    
+                # 4. Final Scaler Update
+                self.scaler.update()
                 
-                # Cleanup VRAM between shards to prevent fragmentation
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
+                # 🚀 Phase 11 & 14: Multi-Class Metrics (Accuracy, Precision, AUC, F1)
+                from sklearn.metrics import accuracy_score, precision_score, f1_score, roc_auc_score
+                with torch.no_grad():
+                    logits_np = logits.detach().cpu().numpy()
+                    preds = logits_np.argmax(axis=-1)
+                    true_y = batch_y.cpu().numpy()
+                    
+                    acc = accuracy_score(true_y, preds)
+                    prec = precision_score(true_y, preds, average='macro', zero_division=0)
+                    f1 = f1_score(true_y, preds, average='macro', zero_division=0)
+                    
+                    # 🧠 Phase 20: Accumulate for epoch-level AUC
+                    probs = torch.softmax(logits.detach(), dim=-1).cpu().numpy()
+                    epoch_all_preds.append(preds)
+                    epoch_all_labels.append(true_y)
+                    epoch_all_probs.append(probs)
+                    
+                    # Compute running AUC from accumulated data (use only present classes)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        try:
+                            all_labels_so_far = np.concatenate(epoch_all_labels)
+                            all_probs_so_far = np.concatenate(epoch_all_probs)
+                            present_classes = np.unique(all_labels_so_far).astype(int).tolist()
+                            if len(present_classes) == 3:
+                                # Force strict normalization to exactly 1.0 to avoid scikit-learn float32 precision crash
+                                norm_probs = all_probs_so_far / all_probs_so_far.sum(axis=1, keepdims=True)
+                                auc = roc_auc_score(all_labels_so_far, norm_probs, multi_class='ovr', average='macro', labels=[0, 1, 2])
+                            elif len(present_classes) == 2:
+                                # Binary classification fallback
+                                # Scikit-Learn expects a 1D array of probabilities for the positive class (the second class in present_classes)
+                                pos_class = present_classes[1]
+                                # Re-normalize probabilities just for the two present classes
+                                binary_probs = all_probs_so_far[:, present_classes]
+                                binary_probs = binary_probs / binary_probs.sum(axis=1, keepdims=True)
+                                auc = roc_auc_score(all_labels_so_far, binary_probs[:, 1], labels=present_classes)
+                            else:
+                                auc = 0.5
+                                
+                            if np.isnan(auc):
+                                auc = 0.5
+                        except Exception as e:
+                            logger.error(f"AUC Error B: {e}") 
+                            auc = 0.5
+                    
+                    # Phase 13: "Panic Protection"
+                    if is_adversarial and acc < 0.40:
+                        self.guard.pressure = torch.tensor(max(0.1, self.guard.get_pressure() * 0.9), device=self.device)
+                        if callback: callback(f"🛡️ Epoch {epoch+1} | Panic Protection: Reducing Professor pressure to {self.guard.get_pressure():.2f}")
+                
+                epoch_loss += loss.item()
+                epoch_batches += 1
+                total_batches += 1
+                
+                # Report every 5 batches for high-fidelity "Chart Dance"
+                if callback and epoch_batches % 5 == 0:
+                    progress = int((epoch_batches / total_epoch_batches) * 100)
+                    sw_weights = [f"{w:.2f}" for w in loss_dict["weights"]]
+                    
+                    # Expert "Thoughts" Insight
+                    exp_votes = worker_logits.argmax(dim=-1).cpu().numpy()[0] 
+                    v_map = {0: "L", 1: "S", 2: "W"}
+                    thought_str = "-".join([v_map[v] for v in exp_votes])
+                    
+                    callback(f"Epoch {epoch+1} | B {epoch_batches} | Loss: {loss.item():.4f} | Acc: {acc:.2f} | Prec: {prec:.2f} | AUC: {auc:.2f} | F1: {f1:.2f} | Swarm: {thought_str} | W: {sw_weights} | Pressure: {is_adversarial * current_pressure:.2f} | {progress}%")
+                    
+                    # 🧠 Phase 20: Micro-State Telemetry for "Opened Brain" Dashboard
+                    if hasattr(self, '_micro_state_callback') and self._micro_state_callback:
+                        try:
+                            with torch.no_grad():
+                                _, _, _, _, attn_w, confidence = self.model(x_dict, compute_telemetry=True)
+                                w_probs = torch.softmax(worker_logits[0], dim=-1).cpu().tolist()
+                                c_policy = torch.softmax(logits[0], dim=-1).cpu().tolist()
+                                a_weights = attn_w[0].cpu().tolist() if attn_w is not None else None
+                                conf_scores = confidence[0].squeeze(-1).cpu().tolist() if confidence is not None else None
+                            self._micro_state_callback({
+                                "worker_thoughts": w_probs,
+                                "attention_weights": a_weights,
+                                "consensus_weights": [float(w) for w in loss_dict["weights"]],
+                                "coordinator_policy": c_policy,
+                                "confidence_scores": conf_scores,
+                                "pressure": float(is_adversarial * current_pressure),
+                                "trauma_buffer_size": len(self.trauma_buffer_X),
+                                "learning_rate": float(self.optimizer.param_groups[0]['lr']),
+                            })
+                        except Exception:
+                            pass
+
 
             # 🚀 Phase 13: Validation Pass & OverfittingGuard Update
             val_shard_dir = f"data/cache/{dataset_name}/val_shards"
@@ -738,7 +819,7 @@ class ContinuousLearner:
                                 v_X = torch.cat([v_X, padding], dim=-1)
                         
                         v_x_dict = self._simulate_timeframes(v_X)
-                        v_logits, v_worker_logits, _, _ = self.model(v_x_dict)
+                        v_logits, v_worker_logits, _, _, _, _ = self.model(v_x_dict)
                         v_loss_dict = self.criterion(v_logits, v_worker_logits, v_y)
                         val_loss += v_loss_dict["total"].item()
                         val_batches += 1
