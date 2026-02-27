@@ -542,6 +542,7 @@ async def get_live_execution_status(agent_id: Optional[str] = None):
             "engine_start": engine.start_time,
             "pnl": state.get("pnl", 0.0),
             "trades": state.get("trades", []),
+            "logs": state.get("logs", []),
             "current_inference": asdict(state.get("signal")) if state.get("signal") else None
         }
         
@@ -552,5 +553,6 @@ async def get_live_execution_status(agent_id: Optional[str] = None):
         "engine_start": 0,
         "pnl": 0.0,
         "trades": [],
+        "logs": [],
         "current_inference": None
     }

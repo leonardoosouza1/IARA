@@ -558,7 +558,9 @@ class TrinityEngine:
                 logger.error(f"LFM Error: {res.status_code}")
                 return ""
         except Exception as e:
-            logger.error(f"LFM Connection Failed: {e}")
+            msg = f"LFM Connection Failed: {e}"
+            logger.error(msg)
+            self.state.add_log(f"[Strategic] {msg}")
             return ""
 
     # ──────────────────────────────────────────
@@ -570,11 +572,15 @@ class TrinityEngine:
         self.start_time = time.time()
         self.lfm_thread = threading.Thread(target=self._lfm_worker, daemon=True)
         self.lfm_thread.start()
-        logger.info("🚀 Trinity Engine v11.0 (Full Spectrum) Started")
+        msg = "🚀 Trinity Engine v11.0 (Full Spectrum) Started"
+        logger.info(msg)
+        self.state.add_log(msg)
 
     def stop(self):
         """Gracefully stop the engine."""
         self.active = False
         if self.lfm_thread:
             self.lfm_thread.join(timeout=5)
-        logger.info("🛑 Trinity Engine Stopped")
+        msg = "🛑 Trinity Engine Stopped"
+        logger.info(msg)
+        self.state.add_log(msg)
