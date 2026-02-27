@@ -63,7 +63,7 @@ export function SearchableSelect({
 
       {/* Dropdown Panel */}
       {isOpen && (
-        <div className="absolute z-50 w-full mt-1 bg-zinc-900 border border-zinc-800 rounded-md shadow-xl overflow-hidden animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95">
+        <div className="absolute z-999 w-full mt-1 bg-zinc-900 border border-zinc-800 rounded-md shadow-xl overflow-hidden animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95">
           <div className="flex items-center px-3 border-b border-zinc-800">
             <Search className="mr-2 h-4 w-4 shrink-0 text-zinc-500" />
             <input
@@ -88,7 +88,9 @@ export function SearchableSelect({
                   type="button"
                   className={cn(
                     "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm outline-none hover:bg-zinc-800 hover:text-zinc-100 focus:bg-zinc-800 focus:text-zinc-100 data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-                    value === option.value ? "bg-indigo-500/10 text-indigo-400 font-medium" : "text-zinc-300"
+                    value === option.value
+                      ? "bg-indigo-500/10 text-indigo-400 font-medium"
+                      : "text-zinc-300",
                   )}
                   onClick={() => {
                     onChange(option.value);

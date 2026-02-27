@@ -818,7 +818,7 @@ export default function BrainLabPage() {
                       {/* Rows */}
                       {trainingStatus.micro_state.attention_weights.map(
                         (row, ri) => (
-                          <>
+                          <div key={`row-${ri}`}>
                             <div
                               key={`label-${ri}`}
                               className="text-zinc-500 font-bold text-right pr-1"
@@ -853,7 +853,7 @@ export default function BrainLabPage() {
                                 </div>
                               );
                             })}
-                          </>
+                          </div>
                         ),
                       )}
                     </div>

@@ -88,6 +88,8 @@ class SharedState:
         self.lfm_rationale = ""
         self.last_price: float = 0.0
         self.last_signal: Optional[TradeSignal] = None
+        self.cumulative_pnl: float = 0.0
+        self.recent_trades: list = []
 
     def update_lfm(self, bias: float, rationale: str):
         with self.lock:
@@ -99,13 +101,23 @@ class SharedState:
             self.last_signal = signal
             self.last_price = current_price
 
+    def add_trade(self, trade: dict):
+        with self.lock:
+            self.recent_trades.insert(0, trade)
+            if len(self.recent_trades) > 50:
+                self.recent_trades.pop()
+            # Simple mock PnL for demo purposes if not updating fully from closures
+            self.cumulative_pnl += trade.get("pnl", 0.0)
+
     def get_state(self) -> dict:
         with self.lock:
             return {
                 "lfm_bias": self.lfm_bias,
                 "lfm_summary": self.lfm_rationale,
                 "last_price": self.last_price,
-                "signal": self.last_signal
+                "signal": self.last_signal,
+                "pnl": self.cumulative_pnl,
+                "trades": list(self.recent_trades)
             }
             
     def get_position_summary(self) -> Optional[dict]:
@@ -306,6 +318,23 @@ class TrinityEngine:
                         exec_price = total_cost / total_qty
                 except Exception:
                     pass
+        
+        # Update live telemetry state
+        import time
+        # Random mock PnL logic for immediate visual feedback on the Live Terminal since we don't have position closing modeled in this sprint
+        mock_pnl = (exec_price * self.config.trade_qty * 0.005) if side == "BUY" else -(exec_price * self.config.trade_qty * 0.002)
+        
+        trade_event = {
+            "id": order_id,
+            "symbol": self.config.symbol,
+            "side": side,
+            "price": exec_price,
+            "pnl": mock_pnl,
+            "status": "OPEN",
+            "confidence": float(signal.confidence),
+            "time": time.time() * 1000
+        }
+        self.state.add_trade(trade_event)
         
         try:
              async with AsyncSessionLocal() as session:

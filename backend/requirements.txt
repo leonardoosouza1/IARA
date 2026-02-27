@@ -21,7 +21,7 @@ python-dotenv
 einops
 scikit-learn
 TA-Lib
-alpaca-py
+python-binance
 pytz
 
 # API Server

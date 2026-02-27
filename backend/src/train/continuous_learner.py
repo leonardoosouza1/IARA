@@ -1092,6 +1092,7 @@ class ContinuousLearner:
                     if callback: callback(f"🏆 Epoch {epoch+1} | New best model (Dataset)! Loss: {best_loss:.4f}")
                     # Phase 14: Immediate Auto-Save
                     save_path = self.checkpoint_path or "logs/models/active_model_v10.pth"
+                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
                     torch.save({'model_state_dict': self.model.state_dict()}, save_path)
                     if callback: callback(f"💾 Epoch {epoch+1} | Auto-saved best model to {os.path.basename(save_path)}")
                 
@@ -1135,6 +1136,7 @@ class ContinuousLearner:
         
         save_path = self.checkpoint_path or "logs/models/active_model_v10.pth"
         if callback: callback(f"💾 Saving best checkpoint (Loss: {best_loss:.4f}) to {os.path.basename(save_path)}...")
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         torch.save({'model_state_dict': self.model.state_dict()}, save_path)
         self.update_registry(best_loss, {dataset_name})
         

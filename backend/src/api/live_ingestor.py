@@ -87,7 +87,8 @@ class LiveIngestor:
         """Streams raw trades to calculate CVD (Buy Volume - Sell Volume)."""
         while self.active:
             try:
-                async with self.bsm.trade_socket(symbol=self.symbol) as stream:
+                # Use aggtrade_socket to bundle trades and heavily reduce websocket queue overflows
+                async with self.bsm.aggtrade_socket(symbol=self.symbol) as stream:
                     while self.active:
                         res = await stream.recv()
                         # 'm' is True if the buyer is the market maker (i.e., someone sold into the bid) -> Bearish

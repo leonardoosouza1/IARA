@@ -17,6 +17,8 @@ import {
   WifiOff,
   Zap,
   LogOut,
+  LineChart,
+  Activity,
 } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -39,6 +41,16 @@ const navigation = [
     label: "Brain Lab",
     href: "/dashboard/brain-lab",
     icon: Brain,
+  },
+  {
+    label: "Backtest Studio",
+    href: "/dashboard/backtest",
+    icon: LineChart,
+  },
+  {
+    label: "Live Trading",
+    href: "/dashboard/live",
+    icon: Activity,
   },
   {
     label: "Settings",

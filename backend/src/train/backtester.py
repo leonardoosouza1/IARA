@@ -6,7 +6,8 @@ import json
 import logging
 from typing import Dict, Any
 
-from src.brain.models.swarm import SwarmBrain, WorkerConfig, CoordinatorConfig
+from src.brain.models.liquid_v9 import SwarmBrain, CoordinatorConfig
+from src.brain.models.workers import WorkerConfig
 from src.database.core import get_db
 from src.database.models import Trade
 
@@ -118,16 +119,15 @@ class Backtester:
                     x_dict = self._simulate_timeframes(batch_X)
                     
                     # Forward pass with telemetry
-                    logits, _, _, _, _, confidence = self.model(x_dict, compute_telemetry=True)
+                    logits, _, _, _, _, _ = self.model(x_dict, compute_telemetry=True)
                     
                     # Logits are [Batch, 3] corresponding to Long(0), Short(1), Wait(2)
                     probs = F.softmax(logits, dim=-1)
                     
-                    # Confidence is already the max probability from the forward pass
-                    max_probs = confidence.squeeze(-1) if confidence is not None else probs.max(dim=-1)[0]
-                    base_predictions = probs.argmax(dim=-1)
-                    
                     # 🎯 SNIPER MODE FILTRATION
+                    # Use the network's confidence in its top prediction
+                    max_probs, base_predictions = probs.max(dim=-1)
+                    
                     # If prediction is Long or Short (0 or 1), but confidence is below threshold, override to Wait (2)
                     sniper_predictions = base_predictions.clone()
                     is_action = (base_predictions == 0) | (base_predictions == 1)

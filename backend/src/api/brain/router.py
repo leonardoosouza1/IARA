@@ -310,6 +310,7 @@ async def trigger_data_fetch(request: FetchRequest):
 class BacktestRequest(BaseModel):
     dataset: str = "BTCUSD"
     threshold: float = 0.50
+    model_name: str = "active_model.pth"
 
 def run_backtest_background(request: Dict[str, Any]):
     global backtest_state
@@ -317,6 +318,7 @@ def run_backtest_background(request: Dict[str, Any]):
         backtest_state["is_running"] = True
         backtest_state["dataset"] = request["dataset"]
         backtest_state["threshold"] = request["threshold"]
+        backtest_state["model_name"] = request.get("model_name", "active_model.pth")
         backtest_state["logs"] = []
         backtest_state["results"] = None
         
@@ -327,7 +329,18 @@ def run_backtest_background(request: Dict[str, Any]):
             backtest_state["message"] = msg
 
         from src.train.backtester import Backtester
-        bt = Backtester(model_path="logs/models/active_model_v10.pth")
+        
+        target_model = backtest_state["model_name"]
+        if not target_model.endswith(".pth"):
+            target_model += ".pth"
+            
+        # If it's a direct path (from checkpoints/ or data/), use it. Otherwise assume logs/models
+        if os.path.exists(target_model):
+            model_full_path = target_model
+        else:
+            model_full_path = f"logs/models/{target_model}"
+            
+        bt = Backtester(model_path=model_full_path)
         
         results = bt.evaluate_shards(
             dataset_name=request["dataset"],
@@ -392,46 +405,62 @@ async def delete_dataset(symbol: str):
 @router.get("/models")
 async def list_models():
     import torch
-    model_dir = "logs/models"
-    if not os.path.exists(model_dir): return []
+    
+    # Check both common save directories
+    model_dirs = ["checkpoints", "data", "logs/models"]
     models = []
-    for file in os.listdir(model_dir):
-        if file.endswith(".pth"):
-            full_path = os.path.join(model_dir, file)
-            stats = os.stat(full_path)
+    
+    for model_dir in model_dirs:
+        if not os.path.exists(model_dir):
+            continue
             
-            # Introspect checkpoint for dimensions
-            meta = {"input_dim": "?", "worker_hidden": "?", "coord_hidden": "?", "num_params": "?"}
-            try:
-                state = torch.load(full_path, map_location="cpu", weights_only=False)
-                # input_dim from first worker input_proj
-                w = state.get("swarm.workers.M5.input_proj.weight")
-                if w is not None and hasattr(w, 'shape'):
-                    meta["input_dim"] = int(w.shape[1])
-                    meta["worker_hidden"] = int(w.shape[0])
-                # coord_hidden from policy_head
-                ph = state.get("coordinator.policy_head.weight")
-                if ph is not None and hasattr(ph, 'shape'):
-                    meta["coord_hidden"] = int(ph.shape[1])
-                # Count params
-                meta["num_params"] = sum(v.numel() for v in state.values() if hasattr(v, 'numel'))
-            except Exception:
-                pass
-            
-            models.append({
-                "name": file,
-                "size": f"{stats.st_size / (1024*1024):.2f} MB",
-                "last_modified": datetime.fromtimestamp(stats.st_mtime).isoformat(),
-                **meta
-            })
+        for root, _, files in os.walk(model_dir):
+            for file in files:
+                if file.endswith(".pth"):
+                    full_path = os.path.join(root, file)
+                    stats = os.stat(full_path)
+                    
+                    # Introspect checkpoint for dimensions
+                    meta = {"input_dim": "?", "worker_hidden": "?", "coord_hidden": "?", "num_params": "?"}
+                    try:
+                        state = torch.load(full_path, map_location="cpu", weights_only=False)
+                        # input_dim from first worker input_proj
+                        w = state.get("swarm.workers.M5.input_proj.weight")
+                        if w is not None and hasattr(w, 'shape'):
+                            meta["input_dim"] = int(w.shape[1])
+                            meta["worker_hidden"] = int(w.shape[0])
+                        # coord_hidden from policy_head
+                        ph = state.get("coordinator.policy_head.weight")
+                        if ph is not None and hasattr(ph, 'shape'):
+                            meta["coord_hidden"] = int(ph.shape[1])
+                        # Count params
+                        meta["num_params"] = sum(v.numel() for v in state.values() if hasattr(v, 'numel'))
+                    except Exception:
+                        pass
+                    
+                    # Store relative path from backend root as the name so the active model loader can find it
+                    # Ensure name is unique
+                    rel_name = os.path.relpath(full_path, ".")
+                    
+                    models.append({
+                        "name": rel_name,
+                        "size": f"{stats.st_size / (1024*1024):.2f} MB",
+                        "last_modified": datetime.fromtimestamp(stats.st_mtime).isoformat(),
+                        **meta
+                    })
+    
+    # Sort models by last_modified descending
+    models.sort(key=lambda x: x["last_modified"], reverse=True)
     return models
 
 
-@router.delete("/models/{model_name}")
+@router.delete("/models/{model_name:path}")
 async def delete_model(model_name: str):
     if model_name == "active_model.pth":
         raise HTTPException(status_code=400, detail="Cannot delete the active model directly")
-    path = f"logs/models/{model_name}"
+    
+    # model_name is now a relative path from the list_models call
+    path = model_name
     if os.path.exists(path):
         os.remove(path)
         return {"message": f"Model {model_name} deleted"}
@@ -441,9 +470,16 @@ async def delete_model(model_name: str):
 async def activate_model(request: Dict[str, str]):
     model_name = request.get("name")
     if not model_name: raise HTTPException(status_code=400, detail="Model name required")
-    src = f"logs/models/{model_name}"
+    
+    # model_name is expected to be the path returned by list_models
+    src = model_name
     dst = "logs/models/active_model.pth"
-    if not os.path.exists(src): raise HTTPException(status_code=404, detail="Source model not found")
+    
+    if not os.path.exists(src): 
+        raise HTTPException(status_code=404, detail=f"Source model not found at {src}")
+    
+    os.makedirs("logs/models", exist_ok=True)
+    import shutil
     shutil.copy2(src, dst)
     return {"message": f"Model {model_name} is now active"}
 
@@ -460,3 +496,38 @@ async def list_trades(limit: int = 50, db: AsyncSession = Depends(get_db)):
 async def list_signals(limit: int = 20, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Signal).order_by(desc(Signal.timestamp)).limit(limit))
     return result.scalars().all()
+
+@router.get("/live/status")
+async def get_live_execution_status(agent_id: Optional[str] = None):
+    """Returns the real-time execution state of the active trading engine (Phase 5)."""
+    from src.api.fleet.manager import fleet_manager
+    
+    # If no agent provided, pick the first active one
+    if not agent_id:
+        active_ids = list(fleet_manager.engines.keys())
+        if active_ids:
+            agent_id = active_ids[0]
+    
+    if agent_id and agent_id in fleet_manager.engines:
+        engine = fleet_manager.engines[agent_id]
+        state = engine.state.get_state()
+        
+        # Build payload mapping the newly augmented engine.state
+        return {
+            "agent_id": agent_id,
+            "is_live": engine.active,
+            "engine_start": engine.start_time,
+            "pnl": state.get("pnl", 0.0),
+            "trades": state.get("trades", []),
+            "current_inference": state.get("signal").model_dump() if state.get("signal") else None
+        }
+        
+    # Formatting a default inactive response for the dashboard
+    return {
+        "agent_id": None,
+        "is_live": False,
+        "engine_start": 0,
+        "pnl": 0.0,
+        "trades": [],
+        "current_inference": None
+    }
