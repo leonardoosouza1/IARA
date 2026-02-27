@@ -35,3 +35,7 @@ ccxt
 torch
 torchvision
 torchaudio
+
+# Advanced Market Intelligence (v11)
+hmmlearn
+websockets

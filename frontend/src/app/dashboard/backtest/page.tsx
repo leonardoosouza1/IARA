@@ -117,7 +117,8 @@ export default function BacktestStudioPage() {
             Backtest Studio
           </h1>
           <p className="text-sm text-zinc-500 mt-1 max-w-xl">
-            Simulate historical market conditions against the I.A.R.A. model using configurable entry thresholds.
+            Simulate historical market conditions against the I.A.R.A. model
+            using configurable entry thresholds.
           </p>
         </div>
       </div>
@@ -137,14 +138,19 @@ export default function BacktestStudioPage() {
                 Validation Dataset
               </label>
               <SearchableSelect
-                options={datasets.map((d) => ({ value: d.symbol, label: d.symbol }))}
+                options={datasets.map((d) => ({
+                  value: d.symbol,
+                  label: d.symbol,
+                }))}
                 value={backtestProtocol.dataset}
-                onChange={(val) => setBacktestProtocol({ ...backtestProtocol, dataset: val })}
+                onChange={(val) =>
+                  setBacktestProtocol({ ...backtestProtocol, dataset: val })
+                }
                 placeholder="-- Select Test Shard --"
                 searchPlaceholder="Search Datasets..."
               />
             </div>
-            
+
             <div className="space-y-2">
               <label className="text-[10px] uppercase font-bold text-zinc-500">
                 Brain Model (Weights)
@@ -152,16 +158,20 @@ export default function BacktestStudioPage() {
               <SearchableSelect
                 options={models.map((m) => ({ value: m.name, label: m.name }))}
                 value={backtestProtocol.model_name}
-                onChange={(val) => setBacktestProtocol({ ...backtestProtocol, model_name: val })}
+                onChange={(val) =>
+                  setBacktestProtocol({ ...backtestProtocol, model_name: val })
+                }
                 placeholder="Select a Model"
                 searchPlaceholder="Search weights..."
               />
             </div>
-            
+
             <div className="space-y-2">
               <label className="flex justify-between text-[10px] uppercase font-bold text-zinc-500">
                 <span>Sniper Threshold</span>
-                <span className="text-emerald-400">{(backtestProtocol.threshold * 100).toFixed(0)}%</span>
+                <span className="text-emerald-400">
+                  {(backtestProtocol.threshold * 100)?.toFixed(0)}%
+                </span>
               </label>
               <input
                 type="range"
@@ -171,11 +181,15 @@ export default function BacktestStudioPage() {
                 className="w-full accent-emerald-500"
                 value={backtestProtocol.threshold}
                 onChange={(e) =>
-                  setBacktestProtocol({ ...backtestProtocol, threshold: parseFloat(e.target.value) })
+                  setBacktestProtocol({
+                    ...backtestProtocol,
+                    threshold: parseFloat(e.target.value),
+                  })
                 }
               />
               <p className="text-[9px] text-zinc-600 leading-tight">
-                Minimum AI confidence required to execute a simulated trade. Higher threshold = fewer trades, higher precision.
+                Minimum AI confidence required to execute a simulated trade.
+                Higher threshold = fewer trades, higher precision.
               </p>
             </div>
 
@@ -184,8 +198,10 @@ export default function BacktestStudioPage() {
               disabled={backtestStatus?.is_running || !backtestProtocol.dataset}
               onClick={handleRunBacktest}
             >
-              <Play className="mr-2 h-4 w-4" /> 
-              {backtestStatus?.is_running ? "Backtesting..." : "Run Historical Simulation"}
+              <Play className="mr-2 h-4 w-4" />
+              {backtestStatus?.is_running
+                ? "Backtesting..."
+                : "Run Historical Simulation"}
             </Button>
           </CardContent>
         </Card>
@@ -204,44 +220,64 @@ export default function BacktestStudioPage() {
             )}
           </CardHeader>
           <CardContent className="p-4 flex flex-col md:flex-row gap-4 h-[600px]">
-             {/* Results Window (Moved to Left for better UX on Backtest) */}
+            {/* Results Window (Moved to Left for better UX on Backtest) */}
             <div className="w-full md:w-64 bg-zinc-950/60 border border-zinc-800 rounded-lg p-4 flex flex-col gap-3">
-               <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest text-center border-b border-zinc-800 pb-2">
-                 Simulation Results
-               </p>
-               
-               {backtestStatus?.results ? (
-                 <div className="space-y-4 mt-2">
-                   <div>
-                     <p className="text-[9px] uppercase font-bold text-zinc-500 mb-1">Total Return (PnL)</p>
-                     <p className={cn("text-2xl font-black font-mono tracking-tighter", backtestStatus.results.total_pnl >= 0 ? "text-emerald-400" : "text-rose-400")}>
-                       {backtestStatus.results.total_pnl >= 0 ? "+" : ""}{backtestStatus.results.total_pnl.toFixed(2)}%
-                     </p>
-                   </div>
-                   
-                   <div className="flex justify-between items-center">
-                     <div>
-                       <p className="text-[9px] uppercase font-bold text-zinc-500">Win Rate</p>
-                       <p className="text-sm font-bold text-zinc-300">{(backtestStatus.results.win_rate * 100).toFixed(1)}%</p>
-                     </div>
-                     <div className="text-right">
-                       <p className="text-[9px] uppercase font-bold text-zinc-500">Max Drawdown</p>
-                       <p className="text-sm font-bold text-rose-400">{backtestStatus.results.max_drawdown.toFixed(2)}%</p>
-                     </div>
-                   </div>
-                   
-                   <div className="border-t border-zinc-800 pt-3">
-                     <p className="text-[9px] uppercase font-bold text-zinc-500 flex justify-between">
-                       <span>Executed Trades</span>
-                       <span className="text-zinc-300">{backtestStatus.results.total_trades}</span>
-                     </p>
-                   </div>
-                 </div>
-               ) : (
-                 <div className="flex-1 flex items-center justify-center text-[10px] text-zinc-700 italic text-center">
-                   Results will appear here.
-                 </div>
-               )}
+              <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest text-center border-b border-zinc-800 pb-2">
+                Simulation Results
+              </p>
+
+              {backtestStatus?.results ? (
+                <div className="space-y-4 mt-2">
+                  <div>
+                    <p className="text-[9px] uppercase font-bold text-zinc-500 mb-1">
+                      Total Return (PnL)
+                    </p>
+                    <p
+                      className={cn(
+                        "text-2xl font-black font-mono tracking-tighter",
+                        backtestStatus.results.total_pnl >= 0
+                          ? "text-emerald-400"
+                          : "text-rose-400",
+                      )}
+                    >
+                      {backtestStatus.results.total_pnl >= 0 ? "+" : ""}
+                      {backtestStatus.results.total_pnl?.toFixed(2)}%
+                    </p>
+                  </div>
+
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <p className="text-[9px] uppercase font-bold text-zinc-500">
+                        Win Rate
+                      </p>
+                      <p className="text-sm font-bold text-zinc-300">
+                        {(backtestStatus.results.win_rate * 100)?.toFixed(1)}%
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[9px] uppercase font-bold text-zinc-500">
+                        Max Drawdown
+                      </p>
+                      <p className="text-sm font-bold text-rose-400">
+                        {backtestStatus.results.max_drawdown?.toFixed(2)}%
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="border-t border-zinc-800 pt-3">
+                    <p className="text-[9px] uppercase font-bold text-zinc-500 flex justify-between">
+                      <span>Executed Trades</span>
+                      <span className="text-zinc-300">
+                        {backtestStatus.results.total_trades}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex-1 flex items-center justify-center text-[10px] text-zinc-700 italic text-center">
+                  Results will appear here.
+                </div>
+              )}
             </div>
 
             {/* Logs Window */}

@@ -254,8 +254,11 @@ class SignalEngine:
                         x_dict
                     )
 
-            # Coordinator probability
-            coord_prob = torch.sigmoid(logits).item()
+            # Coordinator directional probability (Legacy backward compatibility)
+            # We map Long vs Short expert scores into a 0.0 to 1.0 scalar.
+            # > 0.5 is Long biased, < 0.5 is Short biased
+            diff_logit = (long_score - short_score).view(-1)
+            coord_prob = torch.sigmoid(diff_logit)[0].item()
 
             # Worker consensus
             votes = self._summarize_votes(worker_logits)

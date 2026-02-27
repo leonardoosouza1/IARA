@@ -233,6 +233,17 @@ def run_training_background(protocol: Dict[str, Any]):
         training_state["message"] = f"Error: {str(e)}"
     finally:
         training_state["is_training"] = False
+        # Free GPU Memory
+        try:
+            import gc
+            import torch
+            if 'learner' in locals():
+                del learner
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:
+            logger.error(f"Failed to clear memory after training: {e}")
 
 def run_data_fetch_background(request: Dict[str, Any]):
     global data_state
@@ -356,6 +367,17 @@ def run_backtest_background(request: Dict[str, Any]):
         backtest_state["message"] = f"Error: {str(e)}"
     finally:
         backtest_state["is_running"] = False
+        # Free GPU Memory
+        try:
+            import gc
+            import torch
+            if 'bt' in locals():
+                del bt
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:
+            logger.error(f"Failed to clear memory after backtest: {e}")
 
 @router.post("/backtest")
 async def trigger_backtest(request: BacktestRequest):
@@ -512,6 +534,7 @@ async def get_live_execution_status(agent_id: Optional[str] = None):
         engine = fleet_manager.engines[agent_id]
         state = engine.state.get_state()
         
+        from dataclasses import asdict
         # Build payload mapping the newly augmented engine.state
         return {
             "agent_id": agent_id,
@@ -519,7 +542,7 @@ async def get_live_execution_status(agent_id: Optional[str] = None):
             "engine_start": engine.start_time,
             "pnl": state.get("pnl", 0.0),
             "trades": state.get("trades", []),
-            "current_inference": state.get("signal").model_dump() if state.get("signal") else None
+            "current_inference": asdict(state.get("signal")) if state.get("signal") else None
         }
         
     # Formatting a default inactive response for the dashboard

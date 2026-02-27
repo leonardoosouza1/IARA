@@ -28,14 +28,23 @@ class Backtester:
         self.coord_hidden = 256
         self.seq_len = 128
         
-        norm_path = "data/cache/BTCUSD/norm_params.pt" # Defaulting for now
-        if os.path.exists(norm_path):
+        # Introspect checkpoint to determine optimal dimensions
+        if os.path.exists(self.model_path):
             try:
-                meta = torch.load(norm_path, map_location='cpu', weights_only=True)
-                if 'feature_cols' in meta:
-                    self.input_dim = len(meta['feature_cols'])
-            except Exception:
-                pass
+                state = torch.load(self.model_path, map_location='cpu', weights_only=False)
+                state_dict = state.get('model_state_dict', state)
+                
+                # Check new v9/v10 attn_proj first, then fallback to old input_proj
+                w = state_dict.get("swarm.workers.M5.attn_proj.weight") or state_dict.get("swarm.workers.M5.input_proj.weight")
+                if w is not None and hasattr(w, 'shape'):
+                    self.input_dim = int(w.shape[1])
+                    self.worker_hidden = int(w.shape[0])
+                    
+                ph = state_dict.get("coordinator.policy_head.weight")
+                if ph is not None and hasattr(ph, 'shape'):
+                    self.coord_hidden = int(ph.shape[1])
+            except Exception as e:
+                logger.warning(f"Could not introspect checkpoint dimensions: {e}")
                 
         self.model = self._load_model()
         

@@ -50,11 +50,14 @@ class FleetManager:
                 self.engines[agent_id].start()
             return agent_id
 
-        checkpoint_path = f"logs/models/{model_name}"
+        import os
+        if os.path.exists(model_name):
+            checkpoint_path = model_name
+        else:
+            checkpoint_path = f"logs/models/{model_name.replace('logs/models/', '')}"
 
         config = EngineConfig(
             symbol=symbol,
-            alpaca_symbol=symbol, # Kept for backward compat or if needed
             market_type=market_type,
             execution_venue=execution_venue,
             checkpoint_path=checkpoint_path,

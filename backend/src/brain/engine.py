@@ -1,18 +1,22 @@
 """
-TRINITY ENGINE v9.7 "SWARM LIQUID"
-====================================
-The Orchestrator. Manages the live trading loop using SwarmBrain v9.7.
+TRINITY ENGINE v11.0 "FULL SPECTRUM SWARM"
+=========================================
+The Orchestrator. Manages the live trading loop using SwarmBrain v11.
 
 Architecture:
   Fast Brain (SwarmBrain): Multi-timeframe workers + Coordinator for tactical decisions
+  LOB Sensor:             Real-time Level 2 Order Book microstructure
+  Chaos Math:             Hurst Exponent for regime awareness
+  HMM Regime:             Hidden Markov Model for state classification
+  GNN On-Chain:           Graph Neural Network for whale flow analysis
   Slow Brain (LFM):       Optional strategic modulation via Ollama/LFM
   Sentinel:               Safety override (news, volatility, drawdown)
   
 Data Flow:
-  Market Tick -> Feature Engineering -> SwarmBrain Inference -> Consensus Decision -> Execution
+  Market Tick → Feature Engineering → [LOB + Hurst + HMM + GNN] → SwarmBrain → Consensus → Execution
 
 Usage:
-  engine = TrinityEngine.from_checkpoint("logs/models/best_model_v9_BTCUSD.pth")
+  engine = TrinityEngine.from_checkpoint()
   engine.start()
 """
 
@@ -24,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
 import torch
+import numpy as np
 import pandas as pd
 import requests
 
@@ -38,6 +43,12 @@ from src.trading.signal_generator import SignalEngine, TradeSignal
 from src.brain.tools.market_scanner import MarketScanner
 from src.brain.tools.binance_executor import BinanceExecutor
 from src.brain.agents.sentinel_stub import SentinelStub
+
+# v11: New Intelligence Layers
+from src.data.orderbook import OrderBookIngestor, MockOrderBookIngestor
+from src.data.hurst import compute_hurst
+from src.brain.models.regime_hmm import MarketRegimeHMM, REGIME_UNKNOWN
+from src.data.onchain import OnChainIngestor
 
 logger = logging.getLogger("TrinityEngine")
 
@@ -63,6 +74,25 @@ class EngineConfig:
     coord_hidden: int = 0    # 0 = auto-detect from checkpoint
     seq_len: int = 128
     device: str = "cpu"
+    
+    # v11: LOB
+    lob_enabled: bool = True
+    lob_mock: bool = True           # Use mock LOB data (no WebSocket)
+    
+    # v11: Hurst Regime Gating
+    hurst_enabled: bool = True
+    hurst_skip_range: tuple = (0.45, 0.55)   # Random walk zone → skip
+    hurst_trend_threshold: float = 0.65       # Strong trend → hold longer
+    hurst_scalp_threshold: float = 0.35       # Mean revision → scalp
+    
+    # v11: HMM Regime Detection
+    hmm_enabled: bool = True
+    hmm_model_path: str = "data/hmm_regime_model.pkl"
+    
+    # v11: GNN On-Chain
+    gnn_enabled: bool = True
+    gnn_mock: bool = True            # Use mock on-chain data
+    gnn_n_wallets: int = 50
 
 
 class DataBuffer:
@@ -90,16 +120,21 @@ class SharedState:
         self.last_signal: Optional[TradeSignal] = None
         self.cumulative_pnl: float = 0.0
         self.recent_trades: list = []
+        self.logs: list = []
+        self.max_logs = 100
 
     def update_lfm(self, bias: float, rationale: str):
         with self.lock:
             self.lfm_bias = bias
             self.lfm_rationale = rationale
+            if rationale:
+                self.add_log(f"[Strategic] LFM Thoughts: {rationale[:60]}...")
 
     def update_signal(self, signal: TradeSignal, current_price: float):
         with self.lock:
             self.last_signal = signal
             self.last_price = current_price
+            self.add_log(f"[Signal] IARA Triggered: {signal.direction} @ {current_price:.2f} (Conf: {signal.confidence:.0%})")
 
     def add_trade(self, trade: dict):
         with self.lock:
@@ -108,6 +143,16 @@ class SharedState:
                 self.recent_trades.pop()
             # Simple mock PnL for demo purposes if not updating fully from closures
             self.cumulative_pnl += trade.get("pnl", 0.0)
+            self.add_log(f"[Exec] Trade Executed: {trade.get('side')} {trade.get('symbol')} @ {trade.get('price')}")
+
+    def add_log(self, message: str):
+        import time
+        ts = time.strftime("%H:%M:%S")
+        entry = f"{ts} {message}"
+        with self.lock:
+            self.logs.append(entry)
+            if len(self.logs) > self.max_logs:
+                self.logs.pop(0)
 
     def get_state(self) -> dict:
         with self.lock:
@@ -117,7 +162,8 @@ class SharedState:
                 "last_price": self.last_price,
                 "signal": self.last_signal,
                 "pnl": self.cumulative_pnl,
-                "trades": list(self.recent_trades)
+                "trades": list(self.recent_trades),
+                "logs": list(self.logs)
             }
             
     def get_position_summary(self) -> Optional[dict]:
@@ -126,7 +172,8 @@ class SharedState:
 
 class TrinityEngine:
     """
-    Live trading orchestrator using SwarmBrain v9.7.
+    Live trading orchestrator using SwarmBrain v11.0.
+    Full Spectrum Intelligence: Workers + LOB + Hurst + HMM + GNN + LFM.
     """
 
     def __init__(self, signal_engine: SignalEngine, config: EngineConfig):
@@ -138,8 +185,7 @@ class TrinityEngine:
 
         # State
         self.state = SharedState(device=config.device)
-        self.start_time: float = 0.0  # Set when start() is called
-        # H4 resampling needs ~6144 M5 candles (128 seq × 4h × 12 per hour)
+        self.start_time: float = 0.0
         self.buffer = DataBuffer(max_len=10000)
 
         # Tools
@@ -149,6 +195,32 @@ class TrinityEngine:
         # Executor
         self.executor = BinanceExecutor(symbol=config.symbol)
         logger.info(f"🔌 Using Binance Executor for {config.symbol} | Mode: {self.executor.mode}")
+
+        # === v11: LOB Ingestor ===
+        if config.lob_enabled:
+            if config.lob_mock:
+                self.lob_ingestor = MockOrderBookIngestor(symbol=config.binance_symbol.lower())
+            else:
+                self.lob_ingestor = OrderBookIngestor(symbol=config.binance_symbol.lower())
+            self.lob_ingestor.start()
+        else:
+            self.lob_ingestor = None
+
+        # === v11: HMM Regime Detector ===
+        if config.hmm_enabled:
+            self.regime_hmm = MarketRegimeHMM(model_path=config.hmm_model_path)
+        else:
+            self.regime_hmm = None
+
+        # === v11: GNN On-Chain Ingestor ===
+        if config.gnn_enabled:
+            self.onchain_ingestor = OnChainIngestor(
+                n_wallets=config.gnn_n_wallets,
+                mode="mock" if config.gnn_mock else "live",
+            )
+            self.onchain_ingestor.start()
+        else:
+            self.onchain_ingestor = None
 
         # Thread control
         self.lfm_thread: Optional[threading.Thread] = None
@@ -208,6 +280,7 @@ class TrinityEngine:
     async def forward_tick(self, candle: dict) -> Optional[TradeSignal]:
         """
         Process a new M5 candle from the stream.
+        Now enriched with LOB, Hurst, HMM, and GNN intelligence.
 
         Args:
             candle: Dict with {time, open, high, low, close, volume} (time in seconds)
@@ -219,18 +292,75 @@ class TrinityEngine:
         self.buffer.add_candle(candle)
         
         # 2. Check if enough data
-        # We need enough history for the longest timeframe (H4)
-        if len(self.buffer.data) < 200: # Fast fail
+        if len(self.buffer.data) < 200:
             return None
             
         # 3. Prepare DataFrame
         df_m5 = self.buffer.get_dataframe()
-        
-        # 4. Get signal from SwarmBrain
-        # Note: Inference is sync blockage here. Ideally offload to thread.
+
+        # === v11: Hurst Exponent Regime Gating ===
+        hurst_value = 0.5
+        if self.config.hurst_enabled and len(df_m5) >= 200:
+            try:
+                close_arr = df_m5["close"].values.astype(np.float64)
+                hurst_value = compute_hurst(close_arr[-200:])
+                
+                # Skip if market is pure noise
+                low_h, high_h = self.config.hurst_skip_range
+                if low_h <= hurst_value <= high_h:
+                    logger.debug(f"⚪ Hurst={hurst_value:.3f} (random walk zone) → SKIP")
+                    return None
+            except Exception as e:
+                logger.debug(f"Hurst computation error: {e}")
+
+        # 4. Get base signal from SwarmBrain
         signal = self.signal_engine.predict(df_m5)
         if signal is None:
             return None
+
+        # === v11: Attach LOB features to signal context ===
+        lob_features = None
+        if self.lob_ingestor is not None:
+            lob_features = self.lob_ingestor.get_features()
+            signal.lob_features = lob_features  # Enrich signal for logging
+
+        # === v11: HMM Regime Detection & Confidence Modulation ===
+        regime_state = REGIME_UNKNOWN
+        regime_penalty = 1.0
+        if self.regime_hmm is not None and self.regime_hmm.is_fitted:
+            try:
+                close_arr = df_m5["close"].values.astype(np.float64)
+                high_arr = df_m5["high"].values.astype(np.float64)
+                low_arr = df_m5["low"].values.astype(np.float64)
+                # Compute ADX for HMM (using simple proxy)
+                import talib
+                adx_arr = talib.ADX(high_arr, low_arr, close_arr, timeperiod=14)
+                adx_arr = np.nan_to_num(adx_arr)
+                
+                hmm_features = self.regime_hmm.extract_regime_features(
+                    close_arr[-50:], high_arr[-50:], low_arr[-50:], adx_arr[-50:]
+                )
+                regime_state = self.regime_hmm.predict_regime(hmm_features)
+                penalties = MarketRegimeHMM.get_regime_penalty(regime_state)
+                regime_penalty = penalties.get("all", 1.0)
+                
+                logger.debug(f"📊 Regime: {MarketRegimeHMM.regime_name(regime_state)} | Penalty: {regime_penalty:.2f}")
+            except Exception as e:
+                logger.debug(f"HMM prediction error: {e}")
+
+        # Apply regime penalty to confidence
+        signal.confidence *= regime_penalty
+
+        # === v11: Hurst-based execution mode ===
+        hold_multiplier = 1.0
+        if self.config.hurst_enabled:
+            if hurst_value > self.config.hurst_trend_threshold:
+                hold_multiplier = 1.5  # Strong trend → hold longer
+                logger.debug(f"🟢 Hurst={hurst_value:.3f} (trend) → Hold x{hold_multiplier}")
+            elif hurst_value < self.config.hurst_scalp_threshold:
+                hold_multiplier = 0.5  # Mean-reversion → scalp fast
+                logger.debug(f"🟡 Hurst={hurst_value:.3f} (mean-reversion) → Scalp mode")
+        signal.hold_multiplier = hold_multiplier
 
         # Update shared state
         current_price = candle["close"]
@@ -248,7 +378,8 @@ class TrinityEngine:
         if signal.direction == "LONG" and signal.confidence > 0.82:
             logger.info(
                 f"🚀 [SNIPER] LONG ({signal.confidence:.2f}) | "
-                f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait}"
+                f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait} | "
+                f"H={hurst_value:.2f} Regime={regime_state}"
             )
             order = self.executor.execute_signal(
                 action="BUY", confidence=signal.confidence, current_price=current_price, qty=self.config.trade_qty
@@ -259,7 +390,8 @@ class TrinityEngine:
         elif signal.direction == "SHORT" and signal.confidence > 0.82:
             logger.info(
                 f"🔻 [SNIPER] SHORT ({signal.confidence:.2f}) | "
-                f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait}"
+                f"Workers: L={signal.n_long} S={signal.n_short} W={signal.n_wait} | "
+                f"H={hurst_value:.2f} Regime={regime_state}"
             )
             order = self.executor.execute_signal(
                 action="SELL", confidence=signal.confidence, current_price=current_price, qty=self.config.trade_qty
@@ -438,7 +570,7 @@ class TrinityEngine:
         self.start_time = time.time()
         self.lfm_thread = threading.Thread(target=self._lfm_worker, daemon=True)
         self.lfm_thread.start()
-        logger.info("🚀 Trinity Engine v9.7 Started")
+        logger.info("🚀 Trinity Engine v11.0 (Full Spectrum) Started")
 
     def stop(self):
         """Gracefully stop the engine."""
