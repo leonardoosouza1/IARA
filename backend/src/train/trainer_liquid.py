@@ -921,6 +921,7 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=100)
     parser.add_argument("--seq-len", type=int, default=256)
     parser.add_argument("--lr", type=float, default=0.001, help="Learning Rate")
+    parser.add_argument("--checkpoint-dir", type=str, default=None, help="Custom checkpoint directory")
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     parser.add_argument("--use-cache", action="store_true", 
                         help="Use pre-computed tensors from data/cache/ (v6.9 Hybrid Engine)")
@@ -969,7 +970,7 @@ if __name__ == "__main__":
             input_dim=train_ds.get_feature_dim(),
             learning_rate=args.lr,
             resume=args.resume,
-            checkpoint_dir=ckt_dir
+            checkpoint_dir=Path(args.checkpoint_dir) if args.checkpoint_dir else CHECKPOINT_DIR
         )
         
         logger.info(f"Using pre-computed cache: {train_ds.get_feature_dim()} features, {len(train_ds)} train samples")
@@ -985,7 +986,8 @@ if __name__ == "__main__":
             patience=args.patience,
             seq_len=args.seq_len,
             learning_rate=args.lr,
-            resume=args.resume
+            resume=args.resume,
+            checkpoint_dir=Path(args.checkpoint_dir) if args.checkpoint_dir else CHECKPOINT_DIR
         )
         
         trainer = Trainer(config, device)
