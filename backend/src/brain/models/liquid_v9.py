@@ -160,8 +160,19 @@ class SwarmCoordinator(nn.Module):
         
         # NEW: Multi-class Policy Head (0: Wait, 1: Long, 2: Short)
         self.policy_head = nn.Linear(config.hidden_dim, 3)
-        
+
+        # Saci-Brain hints projection (Phase 4 of docs/architecture/SACI-BRAIN.md).
+        # Maps the 5-dim hint vector (forest pressure + HDC analog mean/std
+        # at 1h and 4h) into hidden space. Initialised to ZERO so a model
+        # checkpoint trained without hints behaves identically; A/B switch
+        # lives on the caller via passing brain_hints=None.
+        self.brain_hint_dim = 5
+        self.brain_proj = nn.Linear(self.brain_hint_dim, config.hidden_dim)
+
         self._init_weights()
+        # Force brain_proj to start at zero AFTER xavier init in _init_weights
+        nn.init.zeros_(self.brain_proj.weight)
+        nn.init.zeros_(self.brain_proj.bias)
         
     def _init_weights(self):
         for m in self.modules():
@@ -171,29 +182,42 @@ class SwarmCoordinator(nn.Module):
                     nn.init.zeros_(m.bias)
         
     def forward(
-        self, 
-        embeddings: torch.Tensor, 
+        self,
+        embeddings: torch.Tensor,
         worker_logits: torch.Tensor,
         dt: Optional[torch.Tensor] = None,
         hx: Optional[torch.Tensor] = None,
-        compute_telemetry: bool = False
+        compute_telemetry: bool = False,
+        brain_hints: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """`brain_hints` (optional): [batch, 5] tensor produced by
+        brain_kg.hints.compute_hints (the 5-dim row for the traded asset).
+        When None — legacy behaviour unchanged.
+        """
         # 1. Fuse worker outputs (now returns attention weights and confidence scores)
         context, attn_weights, confidence = self.fusion(embeddings, worker_logits, need_weights=compute_telemetry)
-        
+
         # 2. Refine through CfC
         context_seq = context.unsqueeze(1)
         _, h_refined = self.cfc(context_seq, dt, hx)
-        
+
         # 3. Macro Fusion (Fuse micro execution with macro trend)
         if hasattr(self, 'macro_bias') and self.macro_bias is not None:
             h_refined = self.macro_fusion(torch.cat([h_refined, self.macro_bias], dim=-1))
             h_refined = F.silu(h_refined)
-            
+
+        # 3b. Saci-Brain hint injection (zero-init so this is a no-op until
+        # the brain_proj weights are learned during fine-tune).
+        if brain_hints is not None and hasattr(self, "brain_proj"):
+            hint = brain_hints.to(dtype=h_refined.dtype, device=h_refined.device)
+            if hint.dim() == 1:
+                hint = hint.unsqueeze(0)
+            h_refined = h_refined + self.brain_proj(hint)
+
         # 4. Expert heads
         long_score = self.long_expert(h_refined)
         short_score = self.short_expert(h_refined)
-        
+
         # 5. Policy logits
         policy_logits = self.policy_head(h_refined)
         
