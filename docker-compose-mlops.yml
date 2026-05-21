@@ -73,7 +73,7 @@ services:
     networks:
       - saci-net
 
-  # 5. O Cérebro (Trainer/Inference)
+  # 5. O Cérebro (FastAPI — único frontend é o Next em :3000)
   saci-brain:
     build:
       context: ./backend
@@ -83,17 +83,19 @@ services:
     volumes:
       - ./backend:/app
     ports:
-      - "8501:8501"
+      - "8000:8000"
     environment:
       - DB_URI=${DB_URI}
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - HSA_OVERRIDE_GFX_VERSION=10.3.0
       - OLLAMA_URL=http://ollama:11434/api/generate
       - PYTHONPATH=/app
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - FRONTEND_URL=http://localhost:3000
     networks:
       - saci-net
-    command: >
-      streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    command: ["python", "-m", "src.api.main"]
     
     # GPU & Security (ROCm Config)
     shm_size: '8gb'
