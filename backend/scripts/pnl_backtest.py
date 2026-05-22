@@ -33,6 +33,7 @@ import polars as pl
 import torch
 import torch.nn.functional as F
 
+from src.data.feature_factory import resample_data
 from src.data.model_input import build_features
 from src.train.backtester import Backtester
 
@@ -63,6 +64,8 @@ def main():
     ap.add_argument("--slippage_atr_mult", type=float, default=0.0, help="extra slippage = mult × ATR-fraction per side (volatility-scaled; 0=off)")
     ap.add_argument("--baseline", type=str, default="model", choices=["model", "momentum"],
                     help="'momentum' = trade sign of velocity(ROC) instead of model; honesty check (is the edge just momentum?)")
+    ap.add_argument("--confirm_leader", type=str, default=None, help="leader stem (e.g. BTCUSDM5): only trade when leader's recent direction agrees with the trade (contemporaneous cross-asset confirmation)")
+    ap.add_argument("--confirm_win", type=int, default=3, help="bars of leader return for the confirmation direction")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -112,8 +115,22 @@ def main():
     atr_frac = feats12[entry_idx, 6] / 100.0
     cost_arr = cost_frac + 2.0 * args.slippage_atr_mult * np.clip(atr_frac, 0, None)
 
+    # Contemporaneous cross-asset confirmation: only trade when the leader's
+    # recent direction (causal, up to the entry bar) agrees with the trade.
+    confirm_ok = np.ones(len(starts), dtype=bool)
+    if args.confirm_leader:
+        ldf = pl.read_parquet(f"data/processed/{args.confirm_leader}.parquet")
+        ldf = ldf.rename({c: c.lower() for c in ldf.columns})
+        lm = resample_data(ldf, args.base_tf).to_pandas()[["date", "close"]].set_index("date")
+        lm.index = pd.to_datetime(lm.index, utc=True)
+        lead = lm["close"].reindex(pd.to_datetime(dates, utc=True), method="ffill")
+        lead_dir = np.sign(lead.values - np.roll(lead.values, args.confirm_win))  # causal
+        ld_entry = lead_dir[entry_idx]
+        # pred 0=LONG needs leader up (>0); pred 1=SHORT needs leader down (<0)
+        confirm_ok = ((preds == 0) & (ld_entry > 0)) | ((preds == 1) & (ld_entry < 0))
+
     # NON-overlapping sequential trading
-    eligible = np.isin(preds, [0, 1]) & (confs >= args.threshold)
+    eligible = np.isin(preds, [0, 1]) & (confs >= args.threshold) & confirm_ok
     if args.consensus:
         eligible &= consensus[entry_idx] & (np.abs(raw_ret) >= args.move_thr)
     rets, wins, n_long, n_short, trade_dates = [], 0, 0, 0, []
