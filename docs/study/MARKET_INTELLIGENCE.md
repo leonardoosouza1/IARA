@@ -409,3 +409,54 @@ random-walk, Lente 5A; a conf já a captura), e **sim**:
 > previsíveis), quanto arriscar (tail-risk por regime), e um leve refino de qualidade via
 > regime. Inteligência financeira honesta = **saber em que estado o mercado está e o que
 > isso significa pro risco**, não prever o futuro.
+
+---
+
+## Lente 11 — Estrutura a termo do edge (transfer do byte-lab: MTP)
+
+`scripts/horizon_term_structure.py`. **Origem cross-projeto:** o `byte-language-lab`
+adicionou *Multi-Token Prediction* (MTP, estilo DeepSeek) ao transformer — heads
+auxiliares (λ=0.3) que preveem t+2, t+3… **juntos**. Achado lá: prever mais passos à
+frente regulariza o trunk e os heads aprendem estrutura multi-step real (head t+2 ≥50%
+argmax) **sem machucar o head principal**. O análogo de "prever mais passos à frente"
+no trading é o **horizonte de holding**. Hoje o backtest fixa `horizon=12` barras (1h
+no M5) e sai mecânico — ninguém nunca mediu o que o **mesmo sinal de entrada** rende em
+outros horizontes. Esta lente mede.
+
+**Método (causal):** uma forward só do modelo → direção + confiança no bar de entrada
+(decisão independe do horizonte). Pra cada h, replica a lógica exata do `pnl_backtest`
+(não-overlap, custo round-trip 0.140%) e mede net/trade, win e Sharpe. Conjunto de
+entradas **comum a todos os h** (comparação justa).
+
+**Estrutura a termo (pico de Sharpe cravado em h=12 = 1h, U-invertido):**
+| h (barras) | ~tempo | net-win | net/tr | Sharpe |
+|---|---|---|---|---|
+| 3 | 15m | 49.7% | +0.081% | 7.15 |
+| 6 | 30m | 67.1% | +0.226% | 13.07 |
+| **12** | **1h** | **83.1%** | **+0.406%** | **16.22** |
+| 24 | 2h | 69.6% | +0.423% | 11.71 |
+| 48 | 4h | 63.8% | +0.428% | 7.73 |
+| 96 | 8h | 59.8% | +0.388% | 4.63 |
+| 192 | 16h | 57.2% | +0.387% | 2.68 |
+
+**Transfere OOS (2026, held-out):** pico de Sharpe em h=12 **idêntico** — BTC 16.2 (win
+82.7%), ETH cross-coin 16.4 (win 87.6%). net/trade é quase **plano** de h=12→96; só
+win-rate e Sharpe picam em 1h → **1h captura o movimento com o melhor risco-ajustado**;
+holds mais longos só adicionam retorno tomando mais risco (Sharpe cai). **O `horizon=12`
+hardcoded estava empiricamente certo** — confirmado em treino + 2 OOS.
+
+**Horizonte ótimo NÃO desloca com volatilidade** (`--by_vol`, tercis de ATR causal no
+entry): pico em h=12 nos três regimes (calm/normal/stress). Mas win-rate e Sharpe sobem
+com a vol (calm 73.7% / Sharpe 6.9 → stress 91.6% / Sharpe 13.0). **Lição consistente
+com a Lente 5/7:** a vol gateia **se/quanto** operar, **não o horizonte de saída** —
+saída adaptativa por vol não dá ganho, 1h fixo é robusto.
+
+**Veredito MTP (justifica retrain?):** concordância de sinal entre h=3 e h=192 é só
+**58-63%**, e ganhar no curto eleva ganhar no longo em apenas **+1.4 a +3.1pp** — ou
+seja, os horizontes são fracamente correlacionados e **carregam informação distinta**.
+Um head MTP multi-horizonte no modelo v9 (prever direção a 1h, 2h, 4h junto) carregaria
+sinal genuinamente novo e — pelo achado do byte-lab — regularizaria o trunk **sem custo
+ao head principal**. Habilitaria ainda o análogo *draft/verify*: gate por trade quando os
+horizontes **concordam** (causal, pois todos saem no entry). É o **próximo passo pesado
+justificado por evidência**, não um chute. Sem retrain, o ganho acionável já está
+extraído: **fixar saída em 1h** (validado) e gatear por vol/regime (Lentes 5/7).

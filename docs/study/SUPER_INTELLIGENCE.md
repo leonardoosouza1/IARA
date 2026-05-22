@@ -61,7 +61,8 @@ Saída: um *market-state* → gate (operar?), bias (lado), size (quanto), asset 
 - [x] **Calibração de confiança** — MARKET_INTELLIGENCE §9: Spearman +0.99, conf calibrada
 - [x] **Alpha decay** — §9: nenhum (+0.0007pp/mês em 29 meses), edge regime-dependente mas persistente
 - [x] **Edge condicional / FUSÃO** — MARKET_INTELLIGENCE §10: conditioner do vetor de estado validado OOS (+0.215pp top-half), mas conf já quase-suficiente (AUC +0.012); valor real = risco + timing
-- [ ] Edge vs horizonte de holding
+- [x] **Edge vs horizonte de holding** — MARKET_INTELLIGENCE §11 (transfer MTP do byte-lab): Sharpe U-invertido, pico cravado em h=12 (1h) em treino + 2 OOS; `horizon=12` hardcoded estava certo; horizonte não desloca com vol; horizontes carregam info distinta (agreement 58-63%) → head MTP multi-horizonte justificado
+- [ ] **Head MTP multi-horizonte no v9** (retrain) — prever direção a 1h/2h/4h junto, aux λ≈0.3 (regulariza trunk sem custo ao head principal, achado byte-lab); habilita gate draft/verify causal por concordância de horizontes
 
 ### F. Microestrutura (limitado a OHLCV)
 - [ ] Relação volume-preço (volume confirma movimento?)

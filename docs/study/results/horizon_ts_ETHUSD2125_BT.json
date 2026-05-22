@@ -1,0 +1,88 @@
+{
+  "model": "logs/models/best_model_v9_BTCETHSOL2125_TR.pth",
+  "data": "data/processed/ETHUSD2125_BT.parquet",
+  "years": 0.14,
+  "cost_round_trip_pct": 0.14,
+  "common_entries": 231,
+  "term_structure": [
+    {
+      "horizon_bars": 3,
+      "approx": "15m",
+      "trades": 131,
+      "net_win_pct": 57.25,
+      "net_per_trade_pct": 0.1938,
+      "sharpe": 10.96,
+      "cagr_pct": 518.74,
+      "total_pct": 28.63
+    },
+    {
+      "horizon_bars": 6,
+      "approx": "30m",
+      "trades": 103,
+      "net_win_pct": 74.76,
+      "net_per_trade_pct": 0.3701,
+      "sharpe": 14.71,
+      "cagr_pct": 1444.29,
+      "total_pct": 45.96
+    },
+    {
+      "horizon_bars": 12,
+      "approx": "1h",
+      "trades": 89,
+      "net_win_pct": 87.64,
+      "net_per_trade_pct": 0.5838,
+      "sharpe": 16.36,
+      "cagr_pct": 4045.04,
+      "total_pct": 67.29
+    },
+    {
+      "horizon_bars": 24,
+      "approx": "2h",
+      "trades": 80,
+      "net_win_pct": 65.0,
+      "net_per_trade_pct": 0.4816,
+      "sharpe": 11.78,
+      "cagr_pct": 1471.16,
+      "total_pct": 46.3
+    },
+    {
+      "horizon_bars": 48,
+      "approx": "4h",
+      "trades": 70,
+      "net_win_pct": 67.14,
+      "net_per_trade_pct": 0.4538,
+      "sharpe": 8.56,
+      "cagr_pct": 856.69,
+      "total_pct": 36.61
+    },
+    {
+      "horizon_bars": 96,
+      "approx": "8h",
+      "trades": 56,
+      "net_win_pct": 60.71,
+      "net_per_trade_pct": 0.4551,
+      "sharpe": 5.09,
+      "cagr_pct": 490.04,
+      "total_pct": 27.79
+    },
+    {
+      "horizon_bars": 192,
+      "approx": "16h",
+      "trades": 40,
+      "net_win_pct": 65.0,
+      "net_per_trade_pct": 0.444,
+      "sharpe": 2.48,
+      "cagr_pct": 214.38,
+      "total_pct": 17.14
+    }
+  ],
+  "agreement": {
+    "short_h": 3,
+    "long_h": 192,
+    "sign_agreement_pct": 62.77,
+    "p_win_long": 62.34,
+    "p_win_long_given_short": 65.43,
+    "lift_pp": 3.09
+  },
+  "verdict": "horizontes carregam info DISTINTA \u2192 head MTP multi-horizonte vale o retrain"
+}

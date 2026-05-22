@@ -1,0 +1,111 @@
+{
+  "model": "logs/models/best_model_v9_BTCETHSOL2125_TR.pth",
+  "data": "data/processed/BTCUSD2125_TR.parquet",
+  "years": 4.77,
+  "cost_round_trip_pct": 0.14,
+  "common_entries": 8224,
+  "term_structure": [
+    {
+      "horizon_bars": 3,
+      "approx": "15m",
+      "trades": 4765,
+      "net_win_pct": 49.7,
+      "net_per_trade_pct": 0.0812,
+      "sharpe": 7.15,
+      "cagr_pct": 123.44,
+      "total_pct": 4530.15
+    },
+    {
+      "horizon_bars": 6,
+      "approx": "30m",
+      "trades": 3703,
+      "net_win_pct": 67.08,
+      "net_per_trade_pct": 0.2262,
+      "sharpe": 13.07,
+      "cagr_pct": 472.43,
+      "total_pct": 411611.07
+    },
+    {
+      "horizon_bars": 12,
+      "approx": "1h",
+      "trades": 3114,
+      "net_win_pct": 83.14,
+      "net_per_trade_pct": 0.4062,
+      "sharpe": 16.22,
+      "cagr_pct": 1291.64,
+      "total_pct": 28511128.3
+    },
+    {
+      "horizon_bars": 24,
+      "approx": "2h",
+      "trades": 2885,
+      "net_win_pct": 69.64,
+      "net_per_trade_pct": 0.4225,
+      "sharpe": 11.71,
+      "cagr_pct": 1151.04,
+      "total_pct": 17153416.38
+    },
+    {
+      "horizon_bars": 48,
+      "approx": "4h",
+      "trades": 2468,
+      "net_win_pct": 63.82,
+      "net_per_trade_pct": 0.4276,
+      "sharpe": 7.73,
+      "cagr_pct": 773.63,
+      "total_pct": 3093414.46
+    },
+    {
+      "horizon_bars": 96,
+      "approx": "8h",
+      "trades": 1942,
+      "net_win_pct": 59.78,
+      "net_per_trade_pct": 0.3882,
+      "sharpe": 4.63,
+      "cagr_pct": 356.99,
+      "total_pct": 140494.95
+    },
+    {
+      "horizon_bars": 192,
+      "approx": "16h",
+      "trades": 1406,
+      "net_win_pct": 57.18,
+      "net_per_trade_pct": 0.3867,
+      "sharpe": 2.68,
+      "cagr_pct": 185.01,
+      "total_pct": 14686.18
+    }
+  ],
+  "agreement": {
+    "short_h": 3,
+    "long_h": 192,
+    "sign_agreement_pct": 58.48,
+    "p_win_long": 60.29,
+    "p_win_long_given_short": 61.75,
+    "lift_pp": 1.46
+  },
+  "by_vol": [
+    {
+      "regime": "calm (low ATR)",
+      "best_horizon_bars": 12,
+      "sharpe": 6.89,
+      "net_win_pct": 73.74,
+      "trades": 1192
+    },
+    {
+      "regime": "normal",
+      "best_horizon_bars": 12,
+      "sharpe": 10.36,
+      "net_win_pct": 86.49,
+      "trades": 1066
+    },
+    {
+      "regime": "stress (high ATR)",
+      "best_horizon_bars": 12,
+      "sharpe": 13.04,
+      "net_win_pct": 91.57,
+      "trades": 1044
+    }
+  ],
+  "verdict": "horizontes carregam info DISTINTA \u2192 head MTP multi-horizonte vale o retrain"
+}
