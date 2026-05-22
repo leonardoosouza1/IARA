@@ -46,6 +46,15 @@ Tudo roda dentro do container `saci-brain` (PyTorch ROCm). Ver
 [METHODOLOGY.md § Reprodução](METHODOLOGY.md#reprodução). Scripts:
 `backend/scripts/{split_temporal,feature_factory,pnl_backtest,walk_forward,plot_results}.py`.
 
+## Documentos do estudo
+
+- [METHODOLOGY.md](METHODOLOGY.md) — método, labels, consenso, custos, reprodução
+- [RESULTS.md](RESULTS.md) — todos os experimentos (walk-forward, cross-coin, sizing)
+- [CROSS_ASSET.md](CROSS_ASSET.md) — relações entre moedas (lead-lag, choque, USD/FX)
+- [EDGE_FINDER.md](EDGE_FINDER.md) — onde o edge concentra (vol, sessão, confiança) + filtro combinado
+- [MARKET_INTELLIGENCE.md](MARKET_INTELLIGENCE.md) — estrutura de mercado: rede de correlação, fator PCA, regimes
+- [ENGINEERING.md](ENGINEERING.md) — pipeline, contrato de input, performance
+
 ## Caveats honestos (o que ainda NÃO está provado)
 
 - Retorno composto bruto é full-capital (irreal). Métrica crível = net/trade +
