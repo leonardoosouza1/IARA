@@ -39,7 +39,8 @@ Saída: um *market-state* → gate (operar?), bias (lado), size (quanto), asset 
 - [x] Relógio de mercado (hora) — §5C
 - [ ] **Hurst exponent** por ativo/escala (memória longa, trend vs revert)
 - [x] **Regime-switching (HMM)** — MARKET_INTELLIGENCE §7: 3 estados (calm/normal/stress) persistentes (3.6-4.8d), não teleportam; edge monotônico calm +0.29→stress +1.02%/tr
-- [ ] Sazonalidade: dia-da-semana, mês, ciclo de halving
+- [x] **Sazonalidade: dia-da-semana, mês** — MARKET_INTELLIGENCE §12 (opportunity_scan): quarta quente, sábado frio (confirmado OOS); ciclo halving ainda sem dados
+- [x] **Scanner de oportunidades (Lente 12)** — varredura validada do espaço de condições (397 fatias, Bonferroni |t|≥5.5, confirmação OOS): edge máximo em regime stress (+1.02% OOS, coincide com risco de cauda máximo), sweet-spot conf~0.70, zero traps confirmados, 26% das fatias in-sample eram ruído
 
 ### C. Risco de cauda e extremos
 - [x] **Distribuição de retornos** — MARKET_INTELLIGENCE §8: fat tails (curtose 3.6-10.8)

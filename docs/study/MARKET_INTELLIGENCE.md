@@ -460,3 +460,48 @@ ao head principal**. Habilitaria ainda o análogo *draft/verify*: gate por trade
 horizontes **concordam** (causal, pois todos saem no entry). É o **próximo passo pesado
 justificado por evidência**, não um chute. Sem retrain, o ganho acionável já está
 extraído: **fixar saída em 1h** (validado) e gatear por vol/regime (Lentes 5/7).
+
+---
+
+## Lente 12 — Scanner de oportunidades: mineração validada do espaço de condições
+
+`scripts/opportunity_scan.py`. As outras lentes testam **uma hipótese cada**. Esta
+varre o **espaço de condições inteiro** de uma vez: pra cada fatia do mercado (e cada
+interação 2-a-2) mede o net/trade do modelo e pergunta se o desvio é **real ou ruído**.
+Rigor embutido pra ser descoberta e não data-snooping: piso de amostra (n≥40),
+**t-stat** do net vs 0, **confirmação OOS** (o edge da fatia tem que persistir em 2026
+com o **mesmo sinal**), e **guarda de testes múltiplos** (397 fatias → α de Bonferroni
+1.3e-4 → gate |t|≥5.5). 2368 trades, base treino +0.259%/tr, base 2026 +0.422%/tr.
+
+**Oportunidades (edge>base, |t|≥5.5, confirmadas OOS) — hidden structure:**
+| fatia | n_tr | net_tr | t | net_te (2026) |
+|---|---|---|---|---|
+| **reg=stress** | 87 | +0.750% | 6.9 | **+1.019%** |
+| vol:hi & reg=stress | 79 | +0.762% | 7.0 | +1.019% |
+| **conf~0.70 & reg=normal** | 67 | +0.492% | 8.7 | +0.981% |
+| dow=quarta & reg=normal | 127 | +0.362% | 7.8 | +0.868% |
+| **US & reg=normal** | 217 | +0.551% | 11.8 | +0.804% |
+| **conf~0.70** (sozinho) | 128 | +0.463% | 11.4 | +0.732% |
+| atr:hi *(contemporâneo, descritivo)* | 435 | +0.515% | 14.7 | +0.677% |
+
+**Descobertas não-óbvias:**
+1. **O maior edge mora no regime STRESS** (+1.02% OOS, t=6.9) — contraintuitivo. Cruzando
+   com a Lente 8 (stress = cripto crasha junto, tail-λ 0.61): **o edge é máximo exatamente
+   onde o risco de cauda é máximo**. Tensão de sizing → operar stress mas **encolher o
+   size** (não desligar). Esse é o nó central da super-inteligência: edge e risco
+   coincidem no stress.
+2. **Sweet spot de confiança é ~0.70, não o topo.** O bin conf~0.70 é um pocket
+   destacado (t=11.4) — refina a Lente 9 (calibração monotônica): a **massa** do edge
+   confirmado OOS se concentra em ~0.7, não nas confianças extremas.
+3. **Sazonalidade real e confirmada OOS:** quarta-feira quente; **sábado (dow=6) domina
+   as zonas frias** (edge afina pra ~0). Estrutura de calendário escondida.
+
+**Traps:** **nenhum** money-loser confirmado limpou o gate (|t|≥5.5 + OOS) → a estratégia
+**não tem zona sistemática de perda** forte o bastante. As zonas frias (sábado, corr
+média) só têm edge **fino**, ainda ~positivo — mapa de "operar menos aqui", não "perder
+aqui".
+
+**Honestidade anti-snooping:** das **95** fatias significativas in-sample, **25 (26%)
+falharam** a confirmação OOS — quantifica o imposto de data-mining. As da tabela são as
+sobreviventes. *(atr:hi tem o maior t mas é own-bar contemporâneo = hindsight, marcado
+`d` no output; usar vol_ratio causal pro deploy.)*
