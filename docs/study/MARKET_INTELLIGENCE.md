@@ -109,3 +109,52 @@ principal (consistente com EDGE_FINDER §1 e §5).
 > *entendimento e risco*, não sinais de entrada. O valor é saber que a carteira é
 > menos diversificada do que parece (PC1 64.5%) e que o regime de correlação muda
 > (0.53→0.90) — mas o que move o edge do modelo é a **volatilidade**, não a correlação.
+
+---
+
+## Lente 5 — Estrutura temporal: preço é random-walk, volatilidade é previsível
+
+`scripts/return_structure.py`, retornos log 1h, histórico completo. Esta é a lente
+que **amarra tudo**. (Ver `plots/return_structure.png`.)
+
+### A. Retorno é quase um random-walk
+Autocorrelação dos retornos 1h, lags 1-6h: **~0 em tudo** (±0.03). Variance-ratio
+(q=2..48h) entre **0.86 e 1.01** — reversão fraquíssima, essencialmente passeio
+aleatório.
+
+→ **O edge NÃO vem de timing linear de preço** (não existe estrutura linear pra
+explorar). Vem da seleção não-linear por confiança sobre o estado dos indicadores.
+Isso explica, honestamente, por que o edge direcional bruto é fino (~56%): o sinal
+linear é zero; o ganho está em *quando* o modelo tem confiança, não numa
+previsibilidade do preço.
+
+### B. Volatilidade é altamente previsível — o achado acionável
+Autocorrelação de **|retorno|** (proxy de volatilidade):
+
+| asset | 1h | 6h | 24h | 72h | 168h (1 sem) |
+|---|---|---|---|---|---|
+| BTC | +0.29 | +0.18 | +0.18 | +0.13 | +0.15 |
+| SOL | +0.31 | +0.24 | +0.22 | +0.15 | +0.13 |
+| BNB | +0.34 | +0.26 | +0.23 | +0.17 | +0.16 |
+
+Volatilidade **clusteriza e persiste por semanas** (efeito GARCH clássico). No
+diário: **P(alta-vol amanhã | alta-vol hoje) = 0.64-0.69** vs base 0.33 → **2× lift**.
+
+→ Como o edge do modelo **escala com volatilidade** (Lente 4, EDGE_FINDER §1) e a
+volatilidade é **previsível**, o regime de alto-edge é **antecipável**. Diferente de
+prever direção (impossível, §A), prever *atividade* do mercado é viável e robusto.
+Filtro forward-looking honesto: **estar ativo após dias de alta-vol e na sessão US** —
+não é overfit, é fato estilizado de mercado.
+
+### C. Relógio de mercado
+Volatilidade do BTC por hora UTC tem pico claro em **13-15h (abertura US)**, vale em
+04-05h, bump secundário 00-01h (Ásia). Confirma EDGE_FINDER §2 **direto do dado bruto**
+(não só dos trades) — o efeito de sessão é uma propriedade do mercado, não artefato.
+
+### Síntese das 5 lentes
+> **Não dá pra prever a direção do preço (random-walk), mas dá pra prever QUANDO o
+> mercado fica ativo (volatilidade persiste, concentra na sessão US) — e é exatamente
+> aí que o edge do modelo é maior.** A inteligência de mercado acionável não é um sinal
+> de direção extra; é um *forecast de volatilidade/atividade* que diz quando ligar o
+> modelo e quanto arriscar. O mercado cripto é ~1 fator (PC1 64.5%), esse fator é
+> imprevisível em direção mas previsível em amplitude.
