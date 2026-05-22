@@ -32,6 +32,13 @@ class CoordinatorConfig:
     num_heads: int = 4
     dropout: float = 0.3
     num_cfc_layers: int = 1
+    # Multi-horizon (MTP) auxiliary heads — predict the direction class at LONGER
+    # holding horizons (in bars) from the SAME refined context. Cross-project
+    # transfer from byte-language-lab's Multi-Token Prediction: aux heads that
+    # predict further ahead regularize the shared trunk without hurting the main
+    # head. Empty () = no aux heads = fully backward-compatible (old checkpoints
+    # load unchanged; inference/backtest use the main head at return index 0).
+    mtp_horizons: tuple = ()
 
 
 class CrossAttentionFusion(nn.Module):
@@ -161,6 +168,17 @@ class SwarmCoordinator(nn.Module):
         # NEW: Multi-class Policy Head (0: Wait, 1: Long, 2: Short)
         self.policy_head = nn.Linear(config.hidden_dim, 3)
 
+        # MTP auxiliary heads (one per longer horizon). Same 3-class shape as the
+        # policy head; share h_refined. Created only when configured, so default
+        # models are byte-identical to before. Their logits are stashed on
+        # `self.mtp_logits` each forward (None when no heads) for the trainer to
+        # read — the return tuple is left UNCHANGED so every existing caller works.
+        self.mtp_horizons = tuple(getattr(config, "mtp_horizons", ()) or ())
+        if self.mtp_horizons:
+            self.mtp_heads = nn.ModuleList(
+                [nn.Linear(config.hidden_dim, 3) for _ in self.mtp_horizons])
+        self.mtp_logits = None
+
         # Saci-Brain hints projection (Phase 4 of docs/architecture/SACI-BRAIN.md).
         # Maps the 5-dim hint vector (forest pressure + HDC analog mean/std
         # at 1h and 4h) into hidden space. Initialised to ZERO so a model
@@ -220,7 +238,13 @@ class SwarmCoordinator(nn.Module):
 
         # 5. Policy logits
         policy_logits = self.policy_head(h_refined)
-        
+
+        # 5b. MTP aux logits (longer horizons) from the shared refined context.
+        if self.mtp_horizons:
+            self.mtp_logits = [head(h_refined) for head in self.mtp_heads]
+        else:
+            self.mtp_logits = None
+
         # 6. Differential logit for backward compatibility
         diff_logit = long_score - short_score
         

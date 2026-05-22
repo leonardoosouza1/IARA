@@ -461,6 +461,33 @@ horizontes **concordam** (causal, pois todos saem no entry). É o **próximo pas
 justificado por evidência**, não um chute. Sem retrain, o ganho acionável já está
 extraído: **fixar saída em 1h** (validado) e gatear por vol/regime (Lentes 5/7).
 
+### Resultado do retrain MTP (executado — `scripts/train_mtp.py`)
+Implementei os heads MTP no `SwarmCoordinator` (backward-compatible, `mtp_horizons`)
+e treinei A/B na GPU (BTC 2021-2025, 100.9k amostras golden, 25 épocas, mesma seed,
+aux λ=0.3, heads a 2h/4h). Veredito **honesto e negativo**:
+
+| | val acc (head principal) | aux acc 2h/4h | OOS 2026 net/trade | trades |
+|---|---|---|---|---|
+| **BASE** (sem MTP) | **0.564** | — | **+0.0585%** | 722 |
+| **MTP** | 0.563 | 0.545 / 0.533 | +0.0372% | 903 |
+
+1. **Não machuca o head principal** (0.564 vs 0.563 = empate, dentro do ruído) — a
+   metade "sem custo" do achado do byte-lab **se confirma**.
+2. **Os aux heads aprendem** estrutura real (0.545/0.533 > acaso 0.50) — mas **fraco**.
+3. **Não melhora o trading**: OOS net/trade **caiu** (+0.037 vs +0.059) e a seletividade
+   piorou (903 vs 722 trades). A metade "regulariza o trunk e ajuda" do byte-lab **NÃO
+   transfere** aqui.
+
+**Por quê (refina o veredito acima):** a "info distinta" entre horizontes (agreement
+58-63%) é majoritariamente **ruído distinto**, não **sinal explorável** distinto —
+direção a 2h/4h é quase random-walk (Lente 5A), então a tarefa auxiliar é quase ruído e
+não dá ganho ao trunk. No byte-lab o MTP ajuda porque bytes adjacentes são altamente
+estruturados; aqui não há essa estrutura multi-step. **Conclusão:** NÃO levar heads MTP
+pra produção; o valor do horizonte é o **insight analítico** (saída fixa em 1h, Lente 11),
+não um head extra. Código fica disponível (flag desligada por default) para reteste
+futuro multi-símbolo / com gate draft-verify, mas o 1º experimento fiel diz: sem almoço
+grátis. *(Caveats: 1 símbolo, CE puro sem SwarmLoss completo, 25 épocas, 1 seed.)*
+
 ---
 
 ## Lente 12 — Scanner de oportunidades: mineração validada do espaço de condições

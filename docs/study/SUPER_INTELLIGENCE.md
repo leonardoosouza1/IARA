@@ -63,7 +63,7 @@ Saída: um *market-state* → gate (operar?), bias (lado), size (quanto), asset 
 - [x] **Alpha decay** — §9: nenhum (+0.0007pp/mês em 29 meses), edge regime-dependente mas persistente
 - [x] **Edge condicional / FUSÃO** — MARKET_INTELLIGENCE §10: conditioner do vetor de estado validado OOS (+0.215pp top-half), mas conf já quase-suficiente (AUC +0.012); valor real = risco + timing
 - [x] **Edge vs horizonte de holding** — MARKET_INTELLIGENCE §11 (transfer MTP do byte-lab): Sharpe U-invertido, pico cravado em h=12 (1h) em treino + 2 OOS; `horizon=12` hardcoded estava certo; horizonte não desloca com vol; horizontes carregam info distinta (agreement 58-63%) → head MTP multi-horizonte justificado
-- [ ] **Head MTP multi-horizonte no v9** (retrain) — prever direção a 1h/2h/4h junto, aux λ≈0.3 (regulariza trunk sem custo ao head principal, achado byte-lab); habilita gate draft/verify causal por concordância de horizontes
+- [x] **Head MTP multi-horizonte no v9** (retrain EXECUTADO) — MARKET_INTELLIGENCE §11: A/B GPU BTC 25 épocas. Veredito NEGATIVO honesto: não machuca o head principal (0.564→0.563, empate), aux heads aprendem (0.545/0.533 > acaso), mas NÃO melhora trading (OOS net/trade caiu +0.059→+0.037). "Info distinta" entre horizontes é ruído distinto, não sinal explorável (direção 2h/4h ~random-walk). NÃO levar pra produção; código fica (flag off) p/ reteste futuro
 
 ### F. Microestrutura (limitado a OHLCV)
 - [ ] Relação volume-preço (volume confirma movimento?)

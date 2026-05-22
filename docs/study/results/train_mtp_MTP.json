@@ -1,0 +1,21 @@
+{
+  "tag": "MTP",
+  "mtp": true,
+  "lam": 0.3,
+  "samples": 100900,
+  "majority_baseline": 0.5055,
+  "best_val_main_acc": 0.5628,
+  "aux_val_acc": [
+    0.5448,
+    0.5327
+  ],
+  "aux_horizons": [
+    24,
+    48
+  ],
+  "oos_2026": {
+    "trades": 903,
+    "net_per_trade_pct": 0.0372,
+    "net_win_pct": 59.36
+  }
+}
