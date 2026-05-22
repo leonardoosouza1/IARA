@@ -52,8 +52,25 @@ Tudo roda dentro do container `saci-brain` (PyTorch ROCm). Ver
 - [RESULTS.md](RESULTS.md) — todos os experimentos (walk-forward, cross-coin, sizing)
 - [CROSS_ASSET.md](CROSS_ASSET.md) — relações entre moedas (lead-lag, choque, USD/FX)
 - [EDGE_FINDER.md](EDGE_FINDER.md) — onde o edge concentra (vol, sessão, confiança) + filtro combinado
-- [MARKET_INTELLIGENCE.md](MARKET_INTELLIGENCE.md) — estrutura de mercado: rede de correlação, fator PCA, regimes
+- [MARKET_INTELLIGENCE.md](MARKET_INTELLIGENCE.md) — 12 lentes de estrutura de mercado: correlação/PCA, regimes HMM, vol/spillover, cauda, calibração, fusão, estrutura a termo do edge (transfer MTP), scanner de oportunidades
+- [SUPER_INTELLIGENCE.md](SUPER_INTELLIGENCE.md) — roadmap/brainstorm: vetor de estado de mercado, taxonomia de análises + status
 - [ENGINEERING.md](ENGINEERING.md) — pipeline, contrato de input, performance
+
+## Validação contínua (rastrear como cada mudança afeta tudo)
+
+Cada lente grava um JSON em `docs/study/results/`. `scripts/track_metrics.py`
+achata **todos** os JSONs em ~480 métricas, tira um snapshot tagueado por git SHA
+(`docs/study/results/snapshots/`) e **dá diff** contra o snapshot anterior — depois
+de qualquer mudança (modelo, threshold, custo, relabel, nova lente) você vê numa
+tabela só **quais métricas mexeram, quanto, e se é regressão** (`down=bad` p/
+net/Sharpe/AUC; `up=bad` p/ drawdown/CVaR/snoop). Workflow:
+
+```bash
+# 1. regenere as lentes que a mudança afeta (ex.):
+docker exec saci-brain python -m scripts.opportunity_scan --out_json docs/study/results/opportunity_scan.json
+# 2. veja o que mexeu (passe o SHA do host pq /app não enxerga .git):
+SHA=$(git rev-parse --short HEAD); docker exec -e GIT_SHA=$SHA saci-brain python -m scripts.track_metrics
+```
 
 ## Caveats honestos (o que ainda NÃO está provado)
 
