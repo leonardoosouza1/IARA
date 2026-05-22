@@ -134,13 +134,19 @@ def main():
     if args.consensus:
         eligible &= consensus[entry_idx] & (np.abs(raw_ret) >= args.move_thr)
     rets, wins, n_long, n_short, trade_dates = [], 0, 0, 0, []
+    t_hour, t_atr, t_conf, t_pred = [], [], [], []   # per-trade conditions (edge finder)
     k = 0
     while k < len(starts):
         if eligible[k]:
             sret = raw_ret[k] if preds[k] == 0 else -raw_ret[k]
             net = sret - cost_arr[k]
             rets.append(net)
-            trade_dates.append(dates.iloc[entry_idx[k]])
+            d = dates.iloc[entry_idx[k]]
+            trade_dates.append(d)
+            t_hour.append(pd.Timestamp(d).hour)
+            t_atr.append(float(feats12[entry_idx[k], 6]))   # atr_norm
+            t_conf.append(float(confs[k]))
+            t_pred.append(int(preds[k]))
             wins += int(net > 0)
             n_long += int(preds[k] == 0); n_short += int(preds[k] == 1)
             k += hz  # hold to exit before re-entering (no overlap)
@@ -149,7 +155,8 @@ def main():
     rets = np.array(rets)
     n_tr = len(rets)
     if args.trades_csv and n_tr:
-        pd.DataFrame({"entry": trade_dates, "net": rets}).to_csv(args.trades_csv, index=False)
+        pd.DataFrame({"entry": trade_dates, "net": rets, "hour": t_hour,
+                      "atr": t_atr, "conf": t_conf, "pred": t_pred}).to_csv(args.trades_csv, index=False)
         print(f"wrote {n_tr} trades → {args.trades_csv}")
 
     # Realistic position sizing: deploy a fixed fraction `risk_frac` of current
