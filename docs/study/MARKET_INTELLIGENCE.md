@@ -342,7 +342,50 @@ arbitrado**. Há um vale em mid-2025 (jun-dez: net-win 60-82%, net/trade +0.08 a
 regime fraco/baixa-vol) que **recuperou** em 2026 (+0.30 a +0.56%). → edge é
 **regime-dependente** (consistente com Lentes 4/7) porém estruturalmente persistente.
 
-### Síntese das 9 lentes
+---
+
+## Lente 10 (capstone) — A FUSÃO: vetor de estado + conditioner unificado
+
+`scripts/market_state.py`. A síntese que o roadmap aponta: juntar todas as lentes num
+**vetor de estado causal** por trade e testar se *fundir o estado* seleciona trades
+melhores que a **confiança sozinha** — validado out-of-sample (treino 2024-2025 BTC,
+teste 2026 4-coin: holdout temporal **e** de moeda).
+
+Vetor de estado (tudo causal): `vol_ratio` (vol 24h/720h, Lente 5), `corr` (Lente 3),
+`regime` stress/normal (Lente 7), `us` (Lente 5C), `conf` (modelo). Fusão = regressão
+logística de P(net>0) no vetor.
+
+**Discriminação OOS (2026) de net>0:**
+| modelo | AUC |
+|---|---|
+| só-confiança | 0.685 |
+| estado-completo | 0.697 (Δ+0.012) |
+
+Coeficientes (padronizados): **conf +0.51** ≫ regime-normal +0.30, stress +0.17, us +0.15,
+corr −0.07, vol_ratio −0.01.
+
+**net/trade por quartil do score fundido (2026 holdout):**
+| quartil | só-conf | estado-completo |
+|---|---|---|
+| Q1 (pior) | +0.334% | +0.161% |
+| Q4 (melhor) | +0.665% | **+0.796%** |
+
+**Gate fundido (operar só top-half do state-score, 2026):** +0.432% → **+0.647%/trade**
+(Δ+0.215pp), mantém 50% — melhor que os gates isolados (US +0.146, vol_fc +0.170),
+e **validado OOS** (treinado em anos passados).
+
+### Conclusão honesta da fusão
+A fusão **funciona** out-of-sample, mas **a confiança do modelo já é quase
+estatística-suficiente** da qualidade do trade (AUC +0.012 marginal). O estado de
+mercado adiciona um incremento **fino mas real** — o **regime** (normal/stress vs calm)
+é o que mais soma além da confiança. **Lição:** não super-construir um meta-modelo de
+fusão; o ganho da super-inteligência **não é sinal-extra de direção** (a direção é
+random-walk, Lente 5A; a conf já a captura), e **sim**:
+1. **Risco** (Lente 8: tail-λ 0.61 → colapsar sizing no stress);
+2. **Timing/sizing** (Lentes 5/7: vol previsível, regime persistente → quando e quanto);
+3. Um leve refino de seleção via regime (+0.215pp OOS).
+
+### Síntese das 10 lentes
 > **Não dá pra prever a direção do preço (random-walk), mas dá pra prever QUANDO o
 > mercado fica ativo (volatilidade persiste, concentra na sessão US) — e é exatamente
 > aí que o edge do modelo é maior.** A inteligência de mercado acionável não é um sinal
@@ -354,6 +397,15 @@ regime fraco/baixa-vol) que **recuperou** em 2026 (+0.30 a +0.56%). → edge é
 > As lentes 6-7 reforçam e unificam: a volatilidade também é **~1 fator** (spillover
 > real mas redundante, §6) e o mercado vive em **3 regimes persistentes** (calm/normal/
 > stress) que **não teleportam** (§7) — então o regime atual é um nowcast confiável do
-> edge esperado e do risco. Super-inteligência = fundir esse vetor de estado (amplitude,
-> regime, risco) num único condicionador de *quando/quanto* operar, não num oráculo de
-> direção.
+> edge esperado e do risco. As lentes 8-9 fecham os eixos de **risco** (tail-λ 0.61: cripto
+> crasha junto → colapsar sizing no stress) e de **saúde** (confiança calibrada ρ=0.99,
+> sem alpha-decay).
+>
+> A fusão (§10) testa a tese final: fundido num conditioner, o vetor de estado **funciona
+> OOS** (+0.215pp net/trade no top-half, validado em 2026), mas a **confiança do modelo já
+> é quase suficiente** (AUC +0.012). **Conclusão da super-inteligência:** o ganho não é um
+> oráculo de direção (impossível) nem um meta-modelo de seleção (a conf já faz quase tudo)
+> — é o **vetor de estado como mapa de risco e timing**: quando operar (vol/regime
+> previsíveis), quanto arriscar (tail-risk por regime), e um leve refino de qualidade via
+> regime. Inteligência financeira honesta = **saber em que estado o mercado está e o que
+> isso significa pro risco**, não prever o futuro.

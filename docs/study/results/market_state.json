@@ -1,0 +1,14 @@
+{
+  "auc_conf_only": 0.685,
+  "auc_full_state": 0.697,
+  "coefs": {
+    "vol_ratio": -0.012,
+    "corr": -0.073,
+    "conf": 0.514,
+    "us": 0.152,
+    "stress": 0.169,
+    "normal": 0.296
+  },
+  "tophalf_net_per_trade": 0.647,
+  "baseline_net_per_trade": 0.432
+}

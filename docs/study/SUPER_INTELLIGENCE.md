@@ -60,7 +60,7 @@ Saída: um *market-state* → gate (operar?), bias (lado), size (quanto), asset 
 - [x] Gate de vol causal validado walk-forward — §5 payoff
 - [x] **Calibração de confiança** — MARKET_INTELLIGENCE §9: Spearman +0.99, conf calibrada
 - [x] **Alpha decay** — §9: nenhum (+0.0007pp/mês em 29 meses), edge regime-dependente mas persistente
-- [ ] **Edge condicional**: edge | (vol-state × corr-state × trend-state) — fusão do vetor de estado
+- [x] **Edge condicional / FUSÃO** — MARKET_INTELLIGENCE §10: conditioner do vetor de estado validado OOS (+0.215pp top-half), mas conf já quase-suficiente (AUC +0.012); valor real = risco + timing
 - [ ] Edge vs horizonte de holding
 
 ### F. Microestrutura (limitado a OHLCV)
