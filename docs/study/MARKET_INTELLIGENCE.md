@@ -151,10 +151,31 @@ Volatilidade do BTC por hora UTC tem pico claro em **13-15h (abertura US)**, val
 04-05h, bump secundário 00-01h (Ásia). Confirma EDGE_FINDER §2 **direto do dado bruto**
 (não só dos trades) — o efeito de sessão é uma propriedade do mercado, não artefato.
 
+### Payoff validado — gate de volatilidade CAUSAL (`scripts/vol_gate.py`)
+A afirmação "vol previsível → regime de alto-edge antecipável" foi testada como filtro
+**deployável**: operar só quando a vol realizada das **24h anteriores** à entrada
+(conhecida *antes* da barra, sem lookahead) está acima da mediana expandente. Contrasta
+com o ATR do próprio candle do EDGE_FINDER (contemporâneo). 789 trades 2026:
+
+| gate | n (pooled) | net-win | net/trade | Δ vs base |
+|---|---|---|---|---|
+| baseline | 789 (100%) | 86.4% | +0.422% | — |
+| **vol_fc (causal)** | 191 (24%) | 89.0% | **+0.592%** | **+0.170pp** |
+| US session | 258 (33%) | 88.4% | +0.568% | +0.146pp |
+| both | 68 (9%) | 89.7% | +0.687% | +0.266pp |
+
+O gate causal **levanta net/trade nas 4 moedas** (BNB +0.15, BTC +0.07, ETH +0.39,
+SOL +0.32) — o forecast de volatilidade funciona forward-looking, não é hindsight.
+**Caveat honesto:** melhora a *qualidade por trade*, não o lucro total (corta ~76% dos
+trades → total cai de +333 pra +113). Serve pra sizing risk-adjusted / capital
+limitado, não pra maximizar retorno absoluto. Só 2026 (um regime) — validar
+walk-forward multi-ano antes de confiar.
+
 ### Síntese das 5 lentes
 > **Não dá pra prever a direção do preço (random-walk), mas dá pra prever QUANDO o
 > mercado fica ativo (volatilidade persiste, concentra na sessão US) — e é exatamente
 > aí que o edge do modelo é maior.** A inteligência de mercado acionável não é um sinal
 > de direção extra; é um *forecast de volatilidade/atividade* que diz quando ligar o
 > modelo e quanto arriscar. O mercado cripto é ~1 fator (PC1 64.5%), esse fator é
-> imprevisível em direção mas previsível em amplitude.
+> imprevisível em direção mas previsível em amplitude. O gate de vol causal **prova**
+> que a inteligência é deployável (+0.17pp net/trade, sem lookahead).
