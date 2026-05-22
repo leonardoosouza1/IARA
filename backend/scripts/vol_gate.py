@@ -62,7 +62,9 @@ def report(name, base, gated):
 
 
 def main():
-    files = sorted(glob.glob(f"{RESULTS}/trades_*_2026.csv"))
+    import sys
+    pat = sys.argv[1] if len(sys.argv) > 1 else f"{RESULTS}/trades_*_2026.csv"
+    files = sorted(glob.glob(pat))
     vf = {c: vol_forecast(v) for c, v in ASSETS.items()}
     name_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "BNB": "BNB"}
 

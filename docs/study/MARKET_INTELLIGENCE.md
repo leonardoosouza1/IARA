@@ -166,10 +166,23 @@ com o ATR do próprio candle do EDGE_FINDER (contemporâneo). 789 trades 2026:
 
 O gate causal **levanta net/trade nas 4 moedas** (BNB +0.15, BTC +0.07, ETH +0.39,
 SOL +0.32) — o forecast de volatilidade funciona forward-looking, não é hindsight.
-**Caveat honesto:** melhora a *qualidade por trade*, não o lucro total (corta ~76% dos
-trades → total cai de +333 pra +113). Serve pra sizing risk-adjusted / capital
-limitado, não pra maximizar retorno absoluto. Só 2026 (um regime) — validar
-walk-forward multi-ano antes de confiar.
+
+**Validação walk-forward multi-ano** (cada ano = holdout do modelo WF treinado só
+no passado): o lift **se mantém em 3 regimes independentes**, não é overfit a 2026:
+
+| ano (holdout) | base net/trade | Δ vol_fc | Δ US | Δ both |
+|---|---|---|---|---|
+| 2024 (BTC, regime alta) | +0.304% | +0.103 | +0.146 | +0.269 |
+| 2025 (BTC, regime lateral) | +0.219% | +0.116 | +0.125 | +0.305 |
+| 2026 (4 coins, queda) | +0.422% | +0.170 | +0.146 | +0.266 |
+
+Lift do gate causal **positivo e estável (+0.10 a +0.17pp)** em alta, lateral e queda;
+o gate "both" consistente ~+0.27-0.30pp. A persistência de volatilidade (Lente 5B) é
+fato estilizado robusto → o filtro generaliza no tempo.
+
+**Caveat honesto:** melhora a *qualidade por trade*, não o lucro total (corta ~60-76%
+dos trades). Serve pra sizing risk-adjusted / capital limitado, não pra maximizar
+retorno absoluto. 2024/2025 são BTC-only (modelos WF por ano); 2026 é pooled 4-coin.
 
 ### Síntese das 5 lentes
 > **Não dá pra prever a direção do preço (random-walk), mas dá pra prever QUANDO o
