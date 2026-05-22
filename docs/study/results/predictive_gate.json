@@ -1,0 +1,48 @@
+{
+  "draft_verify": {
+    "base_net_per_trade": 0.0369,
+    "buckets": [
+      {
+        "bucket": "low (out of sync)",
+        "n": 301,
+        "net_per_trade_pct": 0.025
+      },
+      {
+        "bucket": "mid",
+        "n": 301,
+        "net_per_trade_pct": 0.0217
+      },
+      {
+        "bucket": "high (in sync)",
+        "n": 300,
+        "net_per_trade_pct": 0.0643
+      }
+    ],
+    "tophalf_net_per_trade": 0.051,
+    "tophalf_delta_pp": 0.014,
+    "corr_signal_net": 0.0062
+  },
+  "hot_hand": {
+    "base_net_per_trade": 0.4309,
+    "buckets": [
+      {
+        "bucket": "low (out of sync)",
+        "n": 359,
+        "net_per_trade_pct": 0.4091
+      },
+      {
+        "bucket": "mid",
+        "n": 184,
+        "net_per_trade_pct": 0.5367
+      },
+      {
+        "bucket": "high (in sync)",
+        "n": 225,
+        "net_per_trade_pct": 0.3791
+      }
+    ],
+    "tophalf_net_per_trade": 0.45,
+    "tophalf_delta_pp": 0.0191,
+    "corr_signal_net": 0.0162
+  }
+}

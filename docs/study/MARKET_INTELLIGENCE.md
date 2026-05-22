@@ -490,6 +490,41 @@ grátis. *(Caveats: 1 símbolo, CE puro sem SwarmLoss completo, 25 épocas, 1 se
 
 ---
 
+## Lente 13 — Gate preditivo (draft/verify em execução)
+
+`scripts/predictive_gate.py`. O retrain (Lente 11) mostrou que MTP não ajuda como sinal
+de **treino**. Mas a outra metade do byte-lab — *speculative draft/verify* — é uma ideia
+de **inferência**: o modelo rascunha velas à frente e, **conforme esses rascunhos se
+confirmam**, você confia mais nele. Testei isso como gate causal (sem retrain), usando os
+heads MTP já treinados:
+
+- **Draft-verify gate:** a cada barra o modelo rascunha direção a 2h/4h. Um rascunho feito
+  em *m* só é verificável em *m+H*; na barra de entrada *E* uso só rascunhos cujo alvo já
+  fechou (*m+H ≤ E*) → **hit-rate rolante estritamente causal** = "modelo em sintonia
+  agora?". Gate: operar só quando em sintonia.
+- **Hot-hand gate:** win-rate realizado das últimas K calls **fechadas** (estritamente
+  passado) → gateia a próxima.
+
+**Resultado (OOS 2026 BTC):**
+| gate | fora sintonia | em sintonia | top-half | corr(sinal,net) |
+|---|---|---|---|---|
+| draft-verify (902 tr, base +0.037%) | +0.025% | **+0.064%** | +0.051% (Δ+0.014pp) | **+0.006** |
+| hot-hand (768 tr, base +0.431%) | +0.409% | +0.379% | +0.450% (Δ+0.019pp) | +0.016 |
+
+**Veredito honesto:** indício **fraco** e **não-robusto**. O bucket "em sintonia" rendeu
+~2.5× o "fora de sintonia" (0.064 vs 0.025) — coerente com a intuição — **mas a correlação
+sinal↔net é ≈0** e os terços não são monotônicos. Hot-hand não funciona (meio > alto). 
+
+**Por quê:** a direção do preço é random-walk (Lente 5A) — "acertar agora" não prevê
+"acertar a seguir", então skill-streak não carrega sinal; e os drafts a 2h/4h são fracos
+(acc 0.545, Lente 11). No byte-lab o draft/verify funciona porque bytes adjacentes são
+fortemente estruturados; preço não tem essa estrutura na escala de velas. **A ideia é
+correta na forma, mas o mercado não tem o sinal que a faz valer.** Precisaria de um
+forecaster de curto prazo bem melhor — e a Lente 11 já mostrou que direção a 2-4h é
+quase imprevisível, então é improvável. Não deployável como está.
+
+---
+
 ## Lente 12 — Scanner de oportunidades: mineração validada do espaço de condições
 
 `scripts/opportunity_scan.py`. As outras lentes testam **uma hipótese cada**. Esta
