@@ -17,6 +17,22 @@ sys.path.append(os.getcwd())
 # Import Model Architecture (must import classes, not run script)
 from src.brain.train_v9 import SwarmBrain, WorkerConfig, CoordinatorConfig
 
+# Pickle compatibility — older checkpoints (e.g. interrupted_model.pth from
+# Feb 2026) reference a TrainerConfig class that lived in this module then.
+# Expose it here so torch.load resolves the original symbol path.
+try:
+    from src.train.trainer import TrainerConfig as _TrainerConfig
+    TrainerConfig = _TrainerConfig
+except Exception:
+    try:
+        from src.brain.simulate_v8 import TrainerConfig as _TrainerConfig
+        TrainerConfig = _TrainerConfig
+    except Exception:
+        class TrainerConfig:        # permissive fallback for unpickling only
+            def __init__(self, **kw):
+                for k, v in kw.items():
+                    setattr(self, k, v)
+
 # Setup logging
 import logging
 
@@ -396,7 +412,18 @@ def main():
             # Inference
             with torch.no_grad():
                 with torch.amp.autocast("cuda", enabled=(device == "cuda")):
-                    logits, worker_logits, long_imp, short_imp = model(x_dict)
+                    _out = model(x_dict)
+                    # SwarmBrain.forward now returns 6 values:
+                    # (policy_logits, worker_logits, long_score, short_score,
+                    #  attn_weights, confidence). Legacy backtest expected
+                    # a single scalar `logits` (diff = long − short), so we
+                    # reconstruct it here for backward compat with
+                    # decide_by_consensus/sigmoid downstream.
+                    _policy = _out[0]
+                    worker_logits = _out[1]
+                    long_imp = _out[2]
+                    short_imp = _out[3]
+                    logits = (long_imp - short_imp).view(-1)[:1]
                     prob = torch.sigmoid(logits).item()
 
             # Consensus Decision (Swarm)
@@ -563,7 +590,28 @@ def main():
             # Save Snapshot (Freq Capped at 5/sec)
             now = time.time()
             if now - last_save_time > 0.2:
-                votes = model.get_worker_votes(worker_logits)
+                # Newer SwarmBrain dropped .get_worker_votes(); compute votes
+                # inline from worker_logits — same semantics as the old helper.
+                if hasattr(model, "get_worker_votes"):
+                    votes = model.get_worker_votes(worker_logits)
+                else:
+                    # Same semantics as the legacy helper — produce a dict
+                    # carrying per-batch agreement + long/short counts as
+                    # zero-d tensors (so consumers can .mean().item()).
+                    _wl = worker_logits[0:1] if worker_logits.dim() == 3 else worker_logits.unsqueeze(0)
+                    _idx = _wl.argmax(dim=-1)        # [B, num_workers]
+                    n_long  = (_idx == 0).sum(dim=-1).float()
+                    n_short = (_idx == 1).sum(dim=-1).float()
+                    n_wait  = (_idx == 2).sum(dim=-1).float()
+                    total   = _idx.shape[-1]
+                    # agreement = max-vote share, in [1/k, 1]
+                    agreement = torch.stack([n_long, n_short, n_wait], dim=-1).max(dim=-1).values / total
+                    votes = {
+                        "agreement": agreement,
+                        "n_long":    n_long,
+                        "n_short":   n_short,
+                        "n_wait":    n_wait,
+                    }
                 snapshot = {
                     "step": i,
                     "timestamp": current_time.strftime("%Y-%m-%d %H:%M"),

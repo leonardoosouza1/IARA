@@ -230,38 +230,19 @@ class MultiTimeframeDataset(Dataset):
         y = self.y[idx]  # scalar (already float32)
         
         # Simulate timeframe views by downsampling
-        x_dict = {}
-        
-        # Core features for the model (First 12)
+        # Core features for the model (first 12). Multi-timeframe dict via the
+        # shared model_input.make_timeframe_dict — same definition the backtester
+        # uses, so train and backtest can never drift.
+        from src.data.model_input import make_timeframe_dict
         x_core = x[:, :12]
-        
-        # M5: Full resolution
-        x_dict["M5"] = x_core[-self.seq_len:]
-        
-        # Metadata OHLC (Last 4 columns) for Forensics
-        # We only keep it for M5 to save memory
+        x_dict = make_timeframe_dict(x_core, self.seq_len)
+
+        # Metadata OHLC (cols 22:) kept on M5 for forensics only (model ignores).
         ohlc = x[-self.seq_len:, 22:]
         if ohlc.shape[1] < 4:
-            # Pad with zeros if metadata columns are missing in cache
             ohlc = torch.cat([ohlc, torch.zeros(ohlc.shape[0], 4 - ohlc.shape[1])], dim=1)
         x_dict["__ohlc__"] = ohlc
-        
-        # M15: Every 3rd candle
-        step_15 = max(1, self.seq_len // 3)
-        x_dict["M15"] = x_core[::3][-step_15:] if self.seq_len >= 3 else x_core[-1:]
-        
-        # M30: Every 6th candle
-        step_30 = max(1, self.seq_len // 6)
-        x_dict["M30"] = x_core[::6][-step_30:] if self.seq_len >= 6 else x_core[-1:]
-        
-        # H1: Every 12th candle
-        step_h1 = max(1, self.seq_len // 12)
-        x_dict["H1"] = x_core[::12][-step_h1:] if self.seq_len >= 12 else x_core[-1:]
-        
-        # H4: Every 48th candle
-        step_h4 = max(1, self.seq_len // 16)
-        x_dict["H4"] = x_core[::16][-step_h4:] if self.seq_len >= 16 else x_core[-1:]
-        
+
         return x_dict, y
 
 
@@ -405,7 +386,7 @@ class SelectiveMemory:
                     targets = targets.to(device)
                     
                     # Forward
-                    logits, worker_logits, _, _ = model(x_dict)
+                    logits, worker_logits, _, _, _, _ = model(x_dict)
                     
                     # Store individual losses
                     bce = nn.functional.binary_cross_entropy_with_logits(
@@ -510,6 +491,43 @@ class SelectiveMemory:
             return {"error": str(e)}
 
 
+def _classification_metrics(pred_chunks, targets):
+    """3-class metrics from a list of [N,3] softmax-prob chunks + int targets.
+
+    Returns (auc, accuracy):
+      - accuracy: 3-class argmax accuracy
+      - auc: macro one-vs-rest ROC-AUC (ranking quality, drives best-model
+        selection); falls back to L/S directional accuracy if AUC is undefined
+        (e.g. a class absent from this split).
+    """
+    if not pred_chunks or not targets:
+        return 0.5, 0.0
+    probs = np.concatenate(pred_chunks, axis=0)
+    tgt = np.asarray(targets, dtype=int)
+    n = min(len(probs), len(tgt))
+    probs, tgt = probs[:n], tgt[:n]
+    preds = probs.argmax(axis=1)
+    accuracy = float(np.mean(preds == tgt))
+    auc = 0.5
+    present = np.unique(tgt)
+    try:
+        if len(present) == 2:
+            # Binary (e.g. return-label L/S, no Wait): AUC on the higher class's
+            # probability. macro-OvR with a labels=[0,1,2] that includes an
+            # absent class averages in a NaN and freezes best-model selection.
+            pos = int(present.max())
+            auc = float(roc_auc_score((tgt == pos).astype(int), probs[:, pos]))
+        elif len(present) >= 3:
+            auc = float(roc_auc_score(tgt, probs, multi_class="ovr",
+                                      labels=[0, 1, 2], average="macro"))
+    except Exception:
+        m = np.isin(tgt, [0, 1]) & np.isin(preds, [0, 1])
+        auc = float(np.mean(preds[m] == tgt[m])) if m.any() else 0.5
+    if not np.isfinite(auc):
+        auc = 0.5
+    return auc, accuracy
+
+
 def train_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -539,10 +557,10 @@ def train_epoch(
         # Mixed Precision (AMP)
         if config.use_amp:
             with torch.amp.autocast('cuda', enabled=True):
-                logits, worker_logits, _, _ = model(x_dict)
+                logits, worker_logits, _, _, _, _ = model(x_dict)
                 loss_dict = criterion(logits, worker_logits, targets)
         else:
-            logits, worker_logits, _, _ = model(x_dict)
+            logits, worker_logits, _, _, _, _ = model(x_dict)
             loss_dict = criterion(logits, worker_logits, targets)
         
         # Check for NaN
@@ -566,9 +584,9 @@ def train_epoch(
         losses["weights"].append(loss_dict["weights"])
         
         # Track predictions
-        probs = torch.sigmoid(logits.detach()).cpu().numpy()
-        all_preds.extend(probs.flatten())
-        all_targets.extend((targets > 0.5).float().cpu().numpy().flatten())
+        probs = torch.softmax(logits.detach(), dim=-1).cpu().numpy()  # [N,3]
+        all_preds.append(probs)
+        all_targets.extend(targets.long().cpu().numpy().tolist())
         
         # Log progress
         if config.debug or step % 10 == 0:
@@ -589,18 +607,9 @@ def train_epoch(
                  print(f"Step {step}: Loss {step_loss:.4f} | RAM: {mem_usage:.0f}MB", end="\r")
             
             if step % 10 == 0:
-                # Real Accuracy
-                step_acc = np.mean([(p > 0.5) == (t > 0.5) for p, t in zip(probs.flatten(), targets.cpu().numpy().flatten())]) if len(probs) > 0 else 0.5
-                
-                # Real AUC for the step (if possible)
-                try:
-                    # Check if both classes are present in the batch
-                    if len(np.unique(targets.cpu().numpy())) > 1:
-                        step_auc = roc_auc_score(targets.cpu().numpy().flatten(), probs.flatten())
-                    else:
-                        step_auc = df["auc"].iloc[-1] if not df.empty else 0.5 # Use last known if available
-                except:
-                    step_auc = 0.5 
+                # Proper 3-class step metrics (probs is [N,3] softmax).
+                step_tgt = targets.long().cpu().numpy()
+                step_auc, step_acc = _classification_metrics([probs], step_tgt.tolist())
                 
                 logger.info(
                     f"Epoch {epoch} | Step {step}/{len(loader)} | "
@@ -654,16 +663,10 @@ def train_epoch(
     else:
         avg_losses["weights"] = [0.0, 0.0, 0.0]
     
-    try:
-        auc = roc_auc_score(all_targets, all_preds)
-    except:
-        auc = 0.5
-    
-    accuracy = np.mean([(p > 0.5) == t for p, t in zip(all_preds, all_targets)])
-    
+    auc, accuracy = _classification_metrics(all_preds, all_targets)
     avg_losses["auc"] = auc
     avg_losses["accuracy"] = accuracy
-    
+
     return avg_losses, global_step
 
 
@@ -685,30 +688,28 @@ def validate(
                 x_dict = {k: v.to(device) for k, v in x_dict.items()}
                 targets = targets.to(device)
                 
-                logits, worker_logits, _, _ = model(x_dict)
+                logits, worker_logits, _, _, _, _ = model(x_dict)
                 loss_dict = criterion(logits, worker_logits, targets)
                 
                 for key in ["total", "coord", "workers", "consensus"]:
                     losses[key].append(loss_dict[key].item())
                 losses["weights"].append(loss_dict["weights"])
                 
-                probs = torch.sigmoid(logits).cpu().numpy()
-                all_preds.extend(probs.flatten())
-                all_targets.extend((targets > 0.5).float().cpu().numpy().flatten())
-    
+                # Proper 3-class metrics. The old code sigmoid-flattened the
+                # [N,3] logits and compared against binary (target>0.5), which
+                # mismatched lengths → AUC always 0.5 and acc ~50%, and froze
+                # best-model selection at epoch 1 even while the model learned.
+                probs = torch.softmax(logits, dim=-1).cpu().numpy()  # [N,3]
+                all_preds.append(probs)
+                all_targets.extend(targets.long().cpu().numpy().tolist())
+
     avg_losses = {k: np.mean(v) if v else 0.0 for k, v in losses.items() if k != "weights"}
     if losses["weights"]:
         avg_losses["weights"] = np.mean(losses["weights"], axis=0).tolist()
     else:
         avg_losses["weights"] = [0.0, 0.0, 0.0]
-    
-    try:
-        auc = roc_auc_score(all_targets, all_preds)
-    except:
-        auc = 0.5
-    
-    accuracy = np.mean([(p > 0.5) == t for p, t in zip(all_preds, all_targets)])
-    
+
+    auc, accuracy = _classification_metrics(all_preds, all_targets)
     avg_losses["auc"] = auc
     avg_losses["accuracy"] = accuracy
     
@@ -1108,7 +1109,7 @@ def save_forensic_snapshot(model, loader, device, epoch, config):
         with torch.no_grad():
             # Forward pass
             # SwarmBrain v9 returns: logits, worker_logits, long_score, short_score
-            logits, worker_logits, long_score, short_score = model(x_dict)
+            logits, worker_logits, long_score, short_score, _, _ = model(x_dict)
             probs = torch.sigmoid(logits).cpu().numpy()
             
             # worker_logits shape: [batch, num_workers, 3]

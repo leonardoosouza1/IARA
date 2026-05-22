@@ -1,13 +1,24 @@
 # --- Project Specific ---
-data/
-checkpoints/
-checkpoints_lab/
-logs/
-plots/
+# NOTE: anchor with leading / so these match only the repo-root dirs, NOT
+# source dirs like backend/src/data/ (which holds the pipeline code!).
+/data/
+backend/data/
+/checkpoints/
+/checkpoints_lab/
+/logs/
+/plots/
 *.pt
 # *.pth
 *.parquet
 *.csv
+backend/data_brain
+backend/simulation_process.pid
+backend/docs/
+ollama_data/
+
+# Study artifacts ARE part of the documented study — keep them tracked.
+!docs/study/results/*.csv
+!docs/study/plots/*.png
 
 # --- Python ---
 __pycache__/

@@ -34,8 +34,13 @@ class Backtester:
                 state = torch.load(self.model_path, map_location='cpu', weights_only=False)
                 state_dict = state.get('model_state_dict', state)
                 
-                # Check new v9/v10 attn_proj first, then fallback to old input_proj
-                w = state_dict.get("swarm.workers.M5.attn_proj.weight") or state_dict.get("swarm.workers.M5.input_proj.weight")
+                # Check new v9/v10 attn_proj first, then fallback to old input_proj.
+                # NOTE: `a or b` on tensors raises ("Boolean value ambiguous"),
+                # which silently sent introspection to the default. Resolve
+                # explicitly so input_dim matches the checkpoint.
+                w = state_dict.get("swarm.workers.M5.attn_proj.weight")
+                if w is None:
+                    w = state_dict.get("swarm.workers.M5.input_proj.weight")
                 if w is not None and hasattr(w, 'shape'):
                     self.input_dim = int(w.shape[1])
                     self.worker_hidden = int(w.shape[0])
@@ -65,16 +70,11 @@ class Backtester:
         return model
 
     def _simulate_timeframes(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Same logic as continuous_learner.py to build the timeframe dictionary."""
-        seq_len = x.shape[1]
-        tfs = {
-            "M5": x,
-            "M15": x[:, max(0, seq_len-32):, :] if seq_len > 32 else x,
-            "M30": x[:, max(0, seq_len-16):, :] if seq_len > 16 else x,
-            "H1": x[:, max(0, seq_len-8):, :] if seq_len > 8 else x,
-            "H4": x[:, max(0, seq_len-2):, :] if seq_len > 2 else x,
-        }
-        return tfs
+        """Multi-timeframe dict via the shared model_input.make_timeframe_dict —
+        the ONE definition also used by training, so backtest and train can't
+        drift. x is [batch, seq_len, 12] (already truncated to input_dim core)."""
+        from src.data.model_input import make_timeframe_dict
+        return make_timeframe_dict(x, x.shape[1])
 
     def evaluate_shards(self, dataset_name: str, sniper_threshold: float = 0.50, callback=None) -> Dict[str, Any]:
         """

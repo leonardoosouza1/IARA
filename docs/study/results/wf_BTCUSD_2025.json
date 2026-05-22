@@ -1,0 +1,20 @@
+{
+  "model": "logs/models/best_model_v9_WFBTCUSD2025_TR.pth",
+  "data": "data/processed/WFBTCUSD2025_BT.parquet",
+  "threshold": 0.6,
+  "consensus": true,
+  "base_tf": "5m",
+  "risk_frac": 0.1,
+  "cost_round_trip_pct": 0.13999999999999999,
+  "trades": 825,
+  "long": 461,
+  "short": 364,
+  "directional_acc": 55.14,
+  "net_win_pct": 75.52,
+  "net_per_trade_pct": 0.2188,
+  "total_return_pct": 19.76,
+  "cagr_pct": 19.92,
+  "sharpe": 12.27,
+  "max_drawdown_pct": -0.41,
+  "buy_hold_pct": -6.33
+}

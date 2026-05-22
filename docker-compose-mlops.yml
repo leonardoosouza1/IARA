@@ -82,6 +82,14 @@ services:
     container_name: saci-brain
     volumes:
       - ./backend:/app
+      - ./checkpoints:/app/checkpoints
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./config:/app/config
+      - ./reports:/app/reports
+      - ./plots:/app/plots
+      - ./docs:/app/docs
     ports:
       - "8000:8000"
     environment:
