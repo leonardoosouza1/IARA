@@ -1,0 +1,49 @@
+{
+  "trades": 789,
+  "years": 0.38,
+  "f0": 0.1,
+  "base_net_per_trade_pct": 0.4219,
+  "schemes": {
+    "fixed": {
+      "sharpe": 32.19,
+      "max_drawdown_pct": -0.14,
+      "cagr_pct": 138.3,
+      "total_pct": 39.5,
+      "calmar": 1005.47,
+      "mean_exposure": 0.1
+    },
+    "vol_target": {
+      "sharpe": 34.04,
+      "max_drawdown_pct": -0.16,
+      "cagr_pct": 83.7,
+      "total_pct": 26.2,
+      "calmar": 514.28,
+      "mean_exposure": 0.0998
+    },
+    "vol_target+stress_cap": {
+      "sharpe": 33.86,
+      "max_drawdown_pct": -0.16,
+      "cagr_pct": 83.3,
+      "total_pct": 26.1,
+      "calmar": 507.72,
+      "mean_exposure": 0.1
+    },
+    "conf_scale": {
+      "sharpe": 31.53,
+      "max_drawdown_pct": -0.15,
+      "cagr_pct": 151.3,
+      "total_pct": 42.3,
+      "calmar": 1000.89,
+      "mean_exposure": 0.1
+    },
+    "anti_vol (lean in)": {
+      "sharpe": 21.73,
+      "max_drawdown_pct": -0.41,
+      "cagr_pct": 211.5,
+      "total_pct": 54.5,
+      "calmar": 512.78,
+      "mean_exposure": 0.096
+    }
+  },
+  "winner_by_calmar": "fixed"
+}

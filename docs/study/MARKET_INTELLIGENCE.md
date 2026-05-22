@@ -525,6 +525,39 @@ quase imprevisível, então é improvável. Não deployável como está.
 
 ---
 
+## Lente 14 — Sizing baseado em risco: dial de apetite, não fonte de alpha
+
+`scripts/risk_sizing.py`. Síntese dos veredictos: direção é random-walk, mas o edge é
+máximo no stress/alta-vol (Lente 12) — exatamente onde o risco de cauda é máximo (Lente
+8). Edge e risco **coincidem**. O backtest usa sizing fixo; testei se sizing por risco
+ganha. Comparação a **exposição média igual** (mesma agressividade) em 789 trades OOS 2026:
+
+| sizing | Sharpe | CAGR | Calmar | leitura |
+|---|---|---|---|---|
+| **fixed** (baseline) | 32.2 | 138% | **1005** | melhor risco-ajustado |
+| conf_scale (∝ conf) | 31.5 | 151% | 1001 | ~empate com fixed |
+| vol_target (∝ 1/ATR) | **34.0** | 84% | 514 | +suave, **−40% retorno** |
+| vol_target+stress_cap | 33.9 | 83% | 508 | igual ao vol_target |
+| anti_vol (∝ ATR) | 21.7 | **212%** | 513 | +retorno, pior risco-ajustado |
+
+**Veredito:** nenhum esquema domina o fixo. Sizing aqui é um **dial de apetite de risco,
+não fonte de alpha**:
+- **vol-target backfira** — em cripto edge↑vol, então cortar size na alta-vol joga fora os
+  trades de maior edge: Sharpe sobe marginal (+1.8) mas CAGR cai ~40%. A sabedoria de
+  livro ("vol-target = risco constante") **não transfere** porque pressupõe edge⊥vol.
+- **anti-vol** (apostar na vol, onde mora o edge) dá +53% CAGR mas pior Sharpe e maior DD.
+- **conf_scale ≈ fixo** — o gate golden já filtrou pra uma banda estreita de conf, escalar
+  dentro dela quase não move.
+- **fixo é quase-ótimo**: edge/variância é ~plano no espaço de condições → Kelly diz fração
+  ~constante → não há ganho de risco-ajustado de graça.
+
+**Aplicável:** manter **sizing fixo** + os gates validados (conf≥0.66, consenso, vol/regime,
+saída 1h, pular sábado). O sizing vira escolha de mandato: quer retorno → anti-vol; quer
+ride suave → vol-target; default equilibrado → fixo. *(Caveat: DD idealizados minúsculos
+em 5 meses; ranking relativo é robusto, Sharpe/Calmar absolutos não são creíveis.)*
+
+---
+
 ## Lente 12 — Scanner de oportunidades: mineração validada do espaço de condições
 
 `scripts/opportunity_scan.py`. As outras lentes testam **uma hipótese cada**. Esta
