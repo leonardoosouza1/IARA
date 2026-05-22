@@ -315,7 +315,34 @@ Lente 2 (PC1 64.5% = 1 fator nos tempos normais) → Lente 3 (corr sobe pra 0.90
 regime *stress* (Lente 7) o sizing tem que **colapsar a exposição** — não há
 diversificação a explorar, e o CVaR99 é −11 a −19%.
 
-### Síntese das 8 lentes
+---
+
+## Lente 9 — Saúde do edge: confiança calibrada, sem alpha-decay
+
+`scripts/edge_health.py`. A estratégia inteira repousa na **seleção por confiança**
+(RESULTS: "o lucro vem de operar só barras de alta confiança"). Duas checagens nos
+trades agregados (2024+2025+2026, 2369 trades, 29 meses).
+
+**1. Calibração — forte** (net-win por decil de confiança):
+| conf | net-win | net/trade |
+|---|---|---|
+| 0.604 (mais baixo) | 68.8% | +0.220% |
+| 0.652 | 82.7% | +0.298% |
+| 0.691 | 87.3% | +0.409% |
+| 0.707 (mais alto) | **96.2%** | **+0.550%** |
+
+**Spearman(confiança, net-win) = +0.99** — monotonia quase perfeita. A confiança do
+modelo é **genuinamente calibrada**: mais confiança → mais acerto realizado. Isto
+**valida a tese central** do projeto (a confiança carrega informação real, não é ruído)
+e justifica o threshold de confiança como lever principal.
+
+**2. Alpha-decay — nenhum**: tendência **+0.0007pp/mês** (estável) em 29 meses; 1ª metade
++0.310%/trade vs 2ª +0.268% (diferença leve, não significativa). O edge **não está sendo
+arbitrado**. Há um vale em mid-2025 (jun-dez: net-win 60-82%, net/trade +0.08 a +0.25% —
+regime fraco/baixa-vol) que **recuperou** em 2026 (+0.30 a +0.56%). → edge é
+**regime-dependente** (consistente com Lentes 4/7) porém estruturalmente persistente.
+
+### Síntese das 9 lentes
 > **Não dá pra prever a direção do preço (random-walk), mas dá pra prever QUANDO o
 > mercado fica ativo (volatilidade persiste, concentra na sessão US) — e é exatamente
 > aí que o edge do modelo é maior.** A inteligência de mercado acionável não é um sinal

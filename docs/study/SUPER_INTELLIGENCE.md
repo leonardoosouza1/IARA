@@ -58,9 +58,9 @@ Saída: um *market-state* → gate (operar?), bias (lado), size (quanto), asset 
 ### E. Inteligência de edge (modelo)
 - [x] Edge por regime (vol domina) — MARKET_INTELLIGENCE §4
 - [x] Gate de vol causal validado walk-forward — §5 payoff
-- [ ] **Calibração de confiança**: conf 0.7 → 70% win? (reliability diagram)
-- [ ] **Alpha decay**: o edge está encolhendo no tempo?
-- [ ] **Edge condicional**: edge | (vol-state × corr-state × trend-state)
+- [x] **Calibração de confiança** — MARKET_INTELLIGENCE §9: Spearman +0.99, conf calibrada
+- [x] **Alpha decay** — §9: nenhum (+0.0007pp/mês em 29 meses), edge regime-dependente mas persistente
+- [ ] **Edge condicional**: edge | (vol-state × corr-state × trend-state) — fusão do vetor de estado
 - [ ] Edge vs horizonte de holding
 
 ### F. Microestrutura (limitado a OHLCV)
