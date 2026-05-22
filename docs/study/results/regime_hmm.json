@@ -1,0 +1,58 @@
+{
+  "states": {
+    "calm": {
+      "days": 800,
+      "mean_ret_d": 0.00069,
+      "mean_vol_d": 0.00216
+    },
+    "normal": {
+      "days": 858,
+      "mean_ret_d": 0.00046,
+      "mean_vol_d": 0.0042
+    },
+    "stress": {
+      "days": 204,
+      "mean_ret_d": -0.00314,
+      "mean_vol_d": 0.00817
+    }
+  },
+  "transition": {
+    "calm": {
+      "calm": 0.79,
+      "normal": 0.208,
+      "stress": 0.002
+    },
+    "normal": {
+      "calm": 0.187,
+      "normal": 0.742,
+      "stress": 0.071
+    },
+    "stress": {
+      "calm": 0.004,
+      "normal": 0.275,
+      "stress": 0.721
+    }
+  },
+  "stationary": {
+    "calm": 0.415,
+    "normal": 0.463,
+    "stress": 0.122
+  },
+  "edge_2026_by_regime": {
+    "calm": {
+      "n": 473,
+      "netwin": 83.9,
+      "npt": 0.288
+    },
+    "normal": {
+      "n": 218,
+      "netwin": 89.0,
+      "npt": 0.583
+    },
+    "stress": {
+      "n": 24,
+      "netwin": 91.7,
+      "npt": 1.019
+    }
+  }
+}

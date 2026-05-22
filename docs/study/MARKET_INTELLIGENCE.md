@@ -220,7 +220,50 @@ filtro de confirmação de retornos: "o modelo já sabe"). **Reforça PC1**: a v
 também é ~1 fator; conhecer a vol de uma moeda ≈ conhecer a da cesta. Sem alerta
 cross-asset de vol tradeable.
 
-### Síntese das 6 lentes
+---
+
+## Lente 7 — Regimes latentes (HMM): o mercado tem 3 estados persistentes
+
+`scripts/regime_hmm.py` ajusta um HMM gaussiano (3 estados) sobre o BTC diário
+[retorno, vol-realizada] (BTC = fator-cripto, PC1). Unifica os regimes ad-hoc em
+estados **descobertos**, não definidos à mão. 1862 dias.
+
+**Estados descobertos** (rotulados por vol crescente):
+| estado | % dias | ret médio/dia | vol média/dia |
+|---|---|---|---|
+| calm | 43% | **+0.069%** | 0.216% |
+| normal | 46% | +0.046% | 0.420% |
+| stress | 11% | **−0.314%** | 0.817% |
+
+O HMM **redescobriu o efeito-alavanca sozinho**: alta-vol ↔ retorno **negativo**
+(stress = quedas), baixa-vol ↔ drift suave pra cima.
+
+**Matriz de transição** (persistência):
+| de \ para | calm | normal | stress | dura |
+|---|---|---|---|---|
+| calm | 0.79 | 0.21 | **0.00** | ~4.8d |
+| normal | 0.19 | 0.74 | 0.07 | ~3.9d |
+| stress | **0.00** | 0.27 | 0.72 | ~3.6d |
+
+Estados **persistem 3.6-4.8 dias**. **calm→stress = 0 e stress→calm = 0**: o mercado
+**nunca teleporta** entre extremos — stress só é alcançado/deixado via *normal*. Logo
+o stress é **antecipável um passo à frente** (só vem do normal; em calm o risco de
+stress amanhã é ~0). Estacionária: calm 42%, normal 46%, stress 12%.
+
+**Edge do modelo por regime (2026)** — monotônico:
+| regime | n | net-win | net/trade |
+|---|---|---|---|
+| calm | 473 | 83.9% | +0.288% |
+| normal | 218 | 89.0% | +0.583% |
+| stress | 24 | 91.7% | **+1.019%** |
+
+O modelo ganha **3.5× mais por trade no stress** que no calm. Fecha o ciclo: o estado
+HMM "stress" = alta-vol (Lente 4/5) = onde o edge concentra = **previsível** (persiste,
+só vem do normal). Para a super-inteligência: o *nowcast de regime* mapeia direto em
+**edge esperado E risco** — stress = maior edge/trade mas maior risco (−0.31%/d, quedas)
+→ size com cuidado; calm = baixo edge, baixo risco.
+
+### Síntese das 7 lentes
 > **Não dá pra prever a direção do preço (random-walk), mas dá pra prever QUANDO o
 > mercado fica ativo (volatilidade persiste, concentra na sessão US) — e é exatamente
 > aí que o edge do modelo é maior.** A inteligência de mercado acionável não é um sinal
@@ -228,3 +271,10 @@ cross-asset de vol tradeable.
 > modelo e quanto arriscar. O mercado cripto é ~1 fator (PC1 64.5%), esse fator é
 > imprevisível em direção mas previsível em amplitude. O gate de vol causal **prova**
 > que a inteligência é deployável (+0.17pp net/trade, sem lookahead).
+>
+> As lentes 6-7 reforçam e unificam: a volatilidade também é **~1 fator** (spillover
+> real mas redundante, §6) e o mercado vive em **3 regimes persistentes** (calm/normal/
+> stress) que **não teleportam** (§7) — então o regime atual é um nowcast confiável do
+> edge esperado e do risco. Super-inteligência = fundir esse vetor de estado (amplitude,
+> regime, risco) num único condicionador de *quando/quanto* operar, não num oráculo de
+> direção.

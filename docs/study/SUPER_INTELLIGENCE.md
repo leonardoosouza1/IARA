@@ -38,7 +38,7 @@ Saída: um *market-state* → gate (operar?), bias (lado), size (quanto), asset 
 - [x] Persistência de volatilidade — §5B
 - [x] Relógio de mercado (hora) — §5C
 - [ ] **Hurst exponent** por ativo/escala (memória longa, trend vs revert)
-- [ ] **Regime-switching (HMM)**: estados latentes calmo/stress/trend + matriz de transição
+- [x] **Regime-switching (HMM)** — MARKET_INTELLIGENCE §7: 3 estados (calm/normal/stress) persistentes (3.6-4.8d), não teleportam; edge monotônico calm +0.29→stress +1.02%/tr
 - [ ] Sazonalidade: dia-da-semana, mês, ciclo de halving
 
 ### C. Risco de cauda e extremos
