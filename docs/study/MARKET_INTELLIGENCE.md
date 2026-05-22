@@ -263,7 +263,59 @@ só vem do normal). Para a super-inteligência: o *nowcast de regime* mapeia dir
 **edge esperado E risco** — stress = maior edge/trade mas maior risco (−0.31%/d, quedas)
 → size com cuidado; calm = baixo edge, baixo risco.
 
-### Síntese das 7 lentes
+---
+
+## Lente 8 — Risco de cauda: cripto crasha junto (o eixo de risco)
+
+`scripts/tail_risk.py`. O vetor de estado precisa de um eixo de **risco**. Quatro views
+(retornos diários BTC/ETH/SOL/BNB, histórico completo).
+
+**Distribuição** — fat tails severas:
+| asset | std/d | skew | curtose-excesso | pior dia | melhor dia |
+|---|---|---|---|---|---|
+| BTC | 2.94% | -0.01 | 3.6 | -15.4% | +14.5% |
+| ETH | 4.03% | +0.15 | 4.7 | -27.7% | +26.2% |
+| SOL | 5.54% | +0.21 | 6.0 | -42.3% | +32.5% |
+| BNB | 3.66% | +0.00 | 10.8 | -34.1% | +32.6% |
+
+Curtose muito acima de 0 (normal) → caudas gordas, jumps grandes (BNB 10.8, o mais
+"saltitante"). Moves diários de até ±42%.
+
+**VaR / CVaR (histórico diário)**: nos piores **1%** dos dias, a perda esperada (CVaR99)
+é **−10.9% (BTC)** a **−18.9% (SOL)**. VaR95 diário −4.6% a −7.8%.
+
+**Drawdown (buy & hold)** — devastador:
+| asset | max DD | submerso (dias) |
+|---|---|---|
+| BTC | −76.7% | 846 |
+| ETH | −79.3% | 1382 |
+| SOL | **−96.3%** | 1168 |
+| BNB | −70.9% | 1127 |
+
+Quedas de 71-96% que levam **2.3 a 3.8 anos** pra recuperar. É **o argumento central da
+estratégia ativa**: o sizing realista teve max DD −0.1 a −0.4% (vs −96% do hold), i.e.,
+**preservação de capital** — modulo fills idealizados.
+
+**Tail-dependence (λ = P(B nos piores 5% | A nos piores 5%))**:
+| | BTC | ETH | SOL | BNB |
+|---|---|---|---|---|
+| BTC | 1.00 | 0.70 | 0.52 | 0.64 |
+| ETH | 0.70 | 1.00 | 0.57 | 0.64 |
+| SOL | 0.52 | 0.57 | 1.00 | 0.59 |
+| BNB | 0.64 | 0.64 | 0.59 | 1.00 |
+
+λ médio **0.61 = 12× o baseline de independência (0.05)**. Quando uma cripto está no seu
+pior dia, as outras estão no *delas* com ~61% de probabilidade. **Crashes co-ocorrem
+massivamente** — a diversificação entre as 4 moedas **falha completamente na cauda**.
+
+### O eixo de risco unificado
+Lente 2 (PC1 64.5% = 1 fator nos tempos normais) → Lente 3 (corr sobe pra 0.90 no stress)
+→ Lente 8 (tail-λ 0.61 = quase perfeitamente acoplado no crash). **A diversificação cripto
+é ilusória e PIORA exatamente quando importa** (a cauda). Para a super-inteligência: no
+regime *stress* (Lente 7) o sizing tem que **colapsar a exposição** — não há
+diversificação a explorar, e o CVaR99 é −11 a −19%.
+
+### Síntese das 8 lentes
 > **Não dá pra prever a direção do preço (random-walk), mas dá pra prever QUANDO o
 > mercado fica ativo (volatilidade persiste, concentra na sessão US) — e é exatamente
 > aí que o edge do modelo é maior.** A inteligência de mercado acionável não é um sinal

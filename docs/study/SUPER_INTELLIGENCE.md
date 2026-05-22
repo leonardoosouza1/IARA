@@ -42,10 +42,10 @@ Saída: um *market-state* → gate (operar?), bias (lado), size (quanto), asset 
 - [ ] Sazonalidade: dia-da-semana, mês, ciclo de halving
 
 ### C. Risco de cauda e extremos
-- [ ] **Distribuição de retornos**: curtose, skew, fat tails por ativo
-- [ ] **Drawdown**: profundidade, duração, recuperação
-- [ ] **VaR / CVaR (Expected Shortfall)** histórico e condicional
-- [ ] **Tail dependence**: crashes co-ocorrem mais que a correlação sugere? (copula lower-tail)
+- [x] **Distribuição de retornos** — MARKET_INTELLIGENCE §8: fat tails (curtose 3.6-10.8)
+- [x] **Drawdown** — §8: maxDD −71 a −96%, submerso 2.3-3.8 anos
+- [x] **VaR / CVaR** — §8: CVaR99 diário −11 a −19%
+- [x] **Tail dependence** — §8: λ=0.61 = 12× independência; crashes co-ocorrem
 - [ ] Detecção de jumps (bipower variation): vol contínua vs saltos
 
 ### D. Cross-asset e fluxo de informação

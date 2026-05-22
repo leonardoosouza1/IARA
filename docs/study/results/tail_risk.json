@@ -1,0 +1,82 @@
+{
+  "distribution": {
+    "BTC": {
+      "skew": -0.01,
+      "exkurt": 3.61,
+      "std_pct": 2.938
+    },
+    "ETH": {
+      "skew": 0.146,
+      "exkurt": 4.66,
+      "std_pct": 4.03
+    },
+    "SOL": {
+      "skew": 0.211,
+      "exkurt": 5.96,
+      "std_pct": 5.54
+    },
+    "BNB": {
+      "skew": 0.0,
+      "exkurt": 10.77,
+      "std_pct": 3.655
+    }
+  },
+  "var_cvar": {
+    "BTC": {
+      "var95": -4.58,
+      "cvar95": -6.89,
+      "var99": -8.19,
+      "cvar99": -10.88
+    },
+    "ETH": {
+      "var95": -6.26,
+      "cvar95": -9.12,
+      "var99": -10.98,
+      "cvar99": -14.18
+    },
+    "SOL": {
+      "var95": -7.77,
+      "cvar95": -11.38,
+      "var99": -12.37,
+      "cvar99": -18.88
+    },
+    "BNB": {
+      "var95": -5.53,
+      "cvar95": -8.44,
+      "var99": -9.26,
+      "cvar99": -14.2
+    }
+  },
+  "drawdown": {
+    "BTC": {
+      "max_dd_pct": -76.7,
+      "underwater_days": 846
+    },
+    "ETH": {
+      "max_dd_pct": -79.3,
+      "underwater_days": 1382
+    },
+    "SOL": {
+      "max_dd_pct": -96.3,
+      "underwater_days": 1168
+    },
+    "BNB": {
+      "max_dd_pct": -70.9,
+      "underwater_days": 1127
+    }
+  },
+  "lower_tail_dep": {
+    "BTC|ETH": 0.7,
+    "BTC|SOL": 0.522,
+    "BTC|BNB": 0.644,
+    "ETH|BTC": 0.7,
+    "ETH|SOL": 0.567,
+    "ETH|BNB": 0.644,
+    "SOL|BTC": 0.522,
+    "SOL|ETH": 0.567,
+    "SOL|BNB": 0.589,
+    "BNB|BTC": 0.644,
+    "BNB|ETH": 0.644,
+    "BNB|SOL": 0.589
+  }
+}
