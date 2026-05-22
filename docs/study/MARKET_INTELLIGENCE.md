@@ -184,7 +184,43 @@ fato estilizado robusto → o filtro generaliza no tempo.
 dos trades). Serve pra sizing risk-adjusted / capital limitado, não pra maximizar
 retorno absoluto. 2024/2025 são BTC-only (modelos WF por ano); 2026 é pooled 4-coin.
 
-### Síntese das 5 lentes
+---
+
+## Lente 6 — Spillover de volatilidade: real mas redundante
+
+`scripts/vol_spillover.py`. CROSS_ASSET mostrou que **retornos** não têm lead-lag.
+E a **volatilidade**? Testado em 43.057 obs de |ret| 1h alinhadas.
+
+**Cross-lag de vol** `corr(A_vol[t], B_vol[t+k])`:
+| par | k=0 | k=1 | k=2 | k=4 | k=6 |
+|---|---|---|---|---|---|
+| BTC→ETH | 0.79 | 0.26 | 0.20 | 0.19 | 0.18 |
+| ETH→BTC | 0.79 | 0.26 | 0.22 | 0.19 | 0.17 |
+
+Diferente dos retornos: vol **tem** cross-lag persistente (~0.2 em k≥1). Vol spilla
+entre moedas com defasagem. **Mas é simétrico** (BTC→ETH ≈ ETH→BTC) → sem líder claro.
+
+**Granger (F-test, p=6 lags)**: tudo Granger-causa tudo (p<1e-3, n=43k = poder enorme).
+Por magnitude de F, se algo "lidera" são os **alts menores → BTC** (SOL→BTC F=48 ≫
+BTC→SOL F=14; BNB→BTC F=45 ≫ 7) — oposto da intuição ingênua de "BTC lidera". Provável
+artefato de magnitude de vol (alts mais ruidosos), não causalidade tradeable.
+
+**Teste prático (o que mata o caso)**: vol cross-asset melhora o forecast de vol de uma
+moeda vs só a própria? **OOS R²:**
+| alvo | só-própria | +cross-asset | ganho |
+|---|---|---|---|
+| BTC | 0.145 | 0.140 | −0.005 |
+| ETH | 0.067 | 0.077 | +0.010 |
+| SOL | 0.171 | 0.160 | −0.011 |
+| BNB | 0.180 | 0.175 | −0.005 |
+
+Cross-asset adiciona **~0** out-of-sample (maioria negativo). O spillover é real
+estatisticamente mas **redundante** — a vol própria já captura tudo (mesmo padrão do
+filtro de confirmação de retornos: "o modelo já sabe"). **Reforça PC1**: a volatilidade
+também é ~1 fator; conhecer a vol de uma moeda ≈ conhecer a da cesta. Sem alerta
+cross-asset de vol tradeable.
+
+### Síntese das 6 lentes
 > **Não dá pra prever a direção do preço (random-walk), mas dá pra prever QUANDO o
 > mercado fica ativo (volatilidade persiste, concentra na sessão US) — e é exatamente
 > aí que o edge do modelo é maior.** A inteligência de mercado acionável não é um sinal
