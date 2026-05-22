@@ -1,0 +1,20 @@
+{
+  "model": "/app/logs/models/best_model_v9_BTCETHSOL2125_TR.pth",
+  "data": "/app/data/processed/BNBUSDT_BT.parquet",
+  "threshold": 0.6,
+  "consensus": true,
+  "base_tf": "5m",
+  "risk_frac": 0.1,
+  "cost_round_trip_pct": 0.13999999999999999,
+  "trades": 246,
+  "long": 130,
+  "short": 116,
+  "directional_acc": 56.5,
+  "net_win_pct": 86.99,
+  "net_per_trade_pct": 0.3358,
+  "total_return_pct": 8.61,
+  "cagr_pct": 24.13,
+  "sharpe": 19.95,
+  "max_drawdown_pct": -0.08,
+  "buy_hold_pct": -23.83
+}

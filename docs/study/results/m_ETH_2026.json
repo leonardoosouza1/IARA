@@ -1,0 +1,20 @@
+{
+  "model": "/app/logs/models/best_model_v9_BTCETHSOL2125_TR.pth",
+  "data": "/app/data/processed/ETHUSD2125_BT.parquet",
+  "threshold": 0.6,
+  "consensus": true,
+  "base_tf": "5m",
+  "risk_frac": 0.1,
+  "cost_round_trip_pct": 0.13999999999999999,
+  "trades": 90,
+  "long": 47,
+  "short": 43,
+  "directional_acc": 56.25,
+  "net_win_pct": 87.78,
+  "net_per_trade_pct": 0.5775,
+  "total_return_pct": 5.33,
+  "cagr_pct": 49.48,
+  "sharpe": 16.89,
+  "max_drawdown_pct": -0.09,
+  "buy_hold_pct": -33.35
+}

@@ -47,3 +47,44 @@ ainda é suficiente.
 
 > Cuidado com overfit: são 4 condições; validar o filtro combinado em holdout
 > separado / outras moedas antes de confiar.
+
+## 5. Backtest do filtro combinado + guarda anti-overfit — `scripts/combined_filter.py`
+Filtro: `atr ≥ p75` (por moeda, **único limiar ajustado**) **&** `hora ∈ [13,20) UTC`
+**&** `conf ≥ 0.66`. 789 trades 2026 (BTC+ETH+SOL+BNB, modelo 3-coin, thr 0.6).
+
+| corte | n | net-win | net/trade |
+|---|---|---|---|
+| baseline (todos) | 789 | 86.4% | +0.422% |
+| **filtro combinado** | **58** | **91.4%** | **+0.902%** |
+
+Combinado **2.1× o net/trade**, mas guarda só **7.4%** dos trades.
+
+### Guarda anti-overfit (corte ATR ajustado em moedas DISJUNTAS)
+O único parâmetro fitado (corte p75 do ATR) é estimado num conjunto de moedas e
+**aplicado em moedas que não entraram no fit** → testa se o filtro generaliza ou
+decora.
+
+| fit → teste | baseline teste | filtrado teste | lift |
+|---|---|---|---|
+| BNB+BTC → ETH+SOL | +0.580% (319) | **+1.103%** (35) | +0.522pp, 97.1% net-win |
+| ETH+SOL → BNB+BTC | +0.314% (470) | **+0.670%** (26) | +0.356pp |
+
+O corte **transfere entre moedas** (lift positivo nos dois sentidos) → o edge de
+volatilidade é estrutural, **não overfit**. (No 2º caso o net-win não sobe, 85→85;
+o ganho vem de selecionar vencedores maiores, não mais acertos.)
+
+### Ablação: combinar vale a pena vs cada condição sozinha?
+| filtro | n | net-win | net/trade | total% |
+|---|---|---|---|---|
+| **alta-vol só** | 199 | 92.0% | +0.755% | **+150.2** |
+| US-session só | 258 | 88.4% | +0.568% | +146.6 |
+| alta-conf só | 327 | 91.7% | +0.540% | +176.5 |
+| **3 combinados** | 58 | 91.4% | +0.902% | +52.3 |
+
+**Veredito honesto:** combinar as 3 dá o **melhor net/trade (+0.902%)** e generaliza
+out-of-sample, mas é agressivo demais — 58 trades em 4 moedas / ~5 meses ≈ 3/moeda/mês.
+Frequência baixa demais pra confiar, e o **lucro total cai** (+52 vs +150 do filtro só-vol)
+porque corta trades bons. **Alta-volatilidade sozinha é o sweet spot**: +0.755%/trade
+(1.8× baseline), mantém 199 trades (25%), captura quase todo o edge com frequência usável.
+Volatilidade era o lever monotônico no §1 — confirmado como o filtro principal.
+Empilhar conf/sessão só quando quiser seletividade máxima e tolerar baixa frequência.
